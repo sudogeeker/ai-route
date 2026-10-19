@@ -1,0 +1,65 @@
+version: 2
+project_name: ai-route
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ai-route
+    main: ./cmd/ai-route
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    binary: ai-route
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+# Buildx publishes one manifest for both platforms. Keep the old per-arch tags too.
+dockers_v2:
+  - id: ai-route
+    ids: [ai-route]
+    images: ["ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"]
+    tags: ["{{ .Tag }}", latest]
+    platforms: [linux/amd64, linux/arm64]
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+  - id: ai-route-amd64
+    ids: [ai-route]
+    images: ["ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"]
+    tags: ["{{ .Tag }}-amd64"]
+    platforms: [linux/amd64]
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+  - id: ai-route-arm64
+    ids: [ai-route]
+    images: ["ghcr.io/{{ .Env.GITHUB_REPOSITORY }}"]
+    tags: ["{{ .Tag }}-arm64"]
+    platforms: [linux/arm64]
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+
+checksum:
+  name_template: 'checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

@@ -1,0 +1,8 @@
+# Fragment: place inside your existing site block.
+@gapi host gapi.example.com
+handle @gapi {
+    reverse_proxy gapi:9999 {
+        # Optional: let existing WebSockets survive config reloads for up to 5m.
+        stream_close_delay 5m
+    }
+}

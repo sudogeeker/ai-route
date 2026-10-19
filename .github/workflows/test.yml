@@ -1,0 +1,56 @@
+name: Test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to validate before releasing
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check
+        run: go vet ./...
+      - name: Build ai-route
+        env:
+          CGO_ENABLED: '0'
+        run: go build -o ai-route ./cmd/ai-route
+      - name: Test with race detector
+        run: go test -race ./... -count=1 -timeout=60s -v
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.18.3
+          install-only: true
+      - name: Validate release configuration
+        run: goreleaser check
+      - name: Build and smoke-test source image
+        run: |
+          docker build -f Dockerfile.source -t ai-route:source-ci .
+          docker run --rm ai-route:source-ci -h
+      - name: Build and smoke-test release image layout
+        run: |
+          image_context="$RUNNER_TEMP/ai-route-release-image"
+          mkdir -p "$image_context/linux/amd64"
+          cp ai-route "$image_context/linux/amd64/ai-route"
+          cp Dockerfile "$image_context/Dockerfile"
+          docker build --platform linux/amd64 -t ai-route:release-ci "$image_context"
+          docker run --rm ai-route:release-ci -h

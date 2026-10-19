@@ -1,0 +1,15 @@
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+RUN CGO_ENABLED=0 go test ./... \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ai-route ./cmd/ai-route
+
+FROM alpine:3
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/ai-route /usr/bin/ai-route
+# Optional gateway auth for /opencode/v1 and OpenCode-backed /v1 routes.
+ENV OPENCODE_AUTH_KEY=""
+# Provider endpoints use the program's built-in defaults.
+ENTRYPOINT ["/usr/bin/ai-route"]
