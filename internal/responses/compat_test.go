@@ -112,7 +112,7 @@ func TestAppendCompatRetryAddsErrorResult(t *testing.T) {
 	if fields.Messages[1].Role != "assistant" || len(fields.Messages[1].ToolCalls) != 1 || fields.Messages[1].ToolCalls[0].Function.Name != "shell" {
 		t.Fatalf("assistant call not preserved: %s", next)
 	}
-	if fields.Messages[1].ReasoningContent == nil || *fields.Messages[1].ReasoningContent != "" {
+	if fields.Messages[1].ReasoningContent == nil || *fields.Messages[1].ReasoningContent != missingReasoningPlaceholder {
 		t.Fatalf("compatibility retry omitted reasoning_content: %s", next)
 	}
 	wire := wireName("exec_command", "")

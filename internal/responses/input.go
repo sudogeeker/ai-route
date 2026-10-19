@@ -261,25 +261,44 @@ func (p *Plan) inputMessages(input, instructions json.RawMessage) ([]object, err
 		}
 	}
 	flushAttachments()
-	ensureToolCallReasoning(messages)
+	ensureAssistantReasoning(messages)
 	return messages, nil
 }
 
-// ensureToolCallReasoning backfills reasoning_content on assistant tool-call
-// messages. Thinking-mode Chat upstreams require the field when replaying a
-// tool call; an empty string is accepted when the original reasoning is no
-// longer available to this stateless adapter.
-func ensureToolCallReasoning(messages []object) {
+// missingReasoningPlaceholder satisfies thinking-mode replay validation when
+// the original reasoning is unavailable to this stateless adapter. DeepSeek
+// treats an empty string as "not passed back"; a single space is accepted.
+const missingReasoningPlaceholder = " "
+
+// ensureAssistantReasoning keeps replayed assistant turns consistent for
+// thinking-mode upstreams. When tools are present, these APIs apply an
+// all-or-nothing rule: once any assistant turn carries reasoning_content,
+// every assistant turn must carry it. Host-synthesized calls and turns whose
+// reasoning item is absent therefore need a placeholder.
+func ensureAssistantReasoning(messages []object) {
+	thinking := false
 	for _, message := range messages {
 		if stringFieldValue(message["role"]) != "assistant" {
 			continue
 		}
-		calls, ok := message["tool_calls"].([]any)
-		if !ok || len(calls) == 0 {
+		if text, _ := message["reasoning_content"].(string); text != "" {
+			thinking = true
+			break
+		}
+		if hasToolCalls(message) {
+			thinking = true
+			break
+		}
+	}
+	if !thinking {
+		return
+	}
+	for _, message := range messages {
+		if stringFieldValue(message["role"]) != "assistant" {
 			continue
 		}
-		if _, ok := message["reasoning_content"].(string); !ok {
-			message["reasoning_content"] = ""
+		if text, _ := message["reasoning_content"].(string); text == "" {
+			message["reasoning_content"] = missingReasoningPlaceholder
 		}
 	}
 }

@@ -239,9 +239,10 @@ func AppendCompatRetry(body []byte, calls []CompatCall, callerTools []string) ([
 		results = append(results, marshal(object{"role": "tool", "tool_call_id": call.ID, "content": notice}))
 	}
 	// Thinking-mode Chat upstreams reject replayed assistant tool calls that
-	// omit reasoning_content, including calls synthesized for this retry.
+	// omit reasoning_content, including calls synthesized for this retry. An
+	// empty string counts as omitted; a single space is the accepted fallback.
 	messages = append(messages, marshal(object{
-		"role": "assistant", "content": nil, "reasoning_content": "", "tool_calls": toolCalls,
+		"role": "assistant", "content": nil, "reasoning_content": missingReasoningPlaceholder, "tool_calls": toolCalls,
 	}))
 	messages = append(messages, results...)
 	fields["messages"], _ = json.Marshal(messages)

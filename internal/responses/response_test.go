@@ -1344,8 +1344,59 @@ func TestPrepareBackfillsReasoningContentForToolCalls(t *testing.T) {
 		t.Fatalf("tool call omitted reasoning_content: %s", plan.ChatBody)
 	}
 	var reasoning string
-	if json.Unmarshal(raw, &reasoning) != nil || reasoning != "" {
+	if json.Unmarshal(raw, &reasoning) != nil || reasoning == "" {
 		t.Fatalf("unexpected reasoning backfill: %s", plan.ChatBody)
+	}
+	if reasoning != missingReasoningPlaceholder {
+		t.Fatalf("unexpected reasoning placeholder: %q", reasoning)
+	}
+}
+
+func TestPrepareBackfillsEveryAssistantTurnForThinkingReplay(t *testing.T) {
+	plan, err := Prepare([]byte(`{"model":"m","input":[
+		{"type":"message","role":"user","content":"hi"},
+		{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"think"}]},
+		{"type":"message","role":"assistant","content":"first"},
+		{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_1","output":"ok"},
+		{"type":"message","role":"assistant","content":"second"},
+		{"type":"message","role":"user","content":"again"}
+	]}`), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat struct {
+		Messages []struct {
+			Role             string `json:"role"`
+			Content          any    `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
+				ID string `json:"id"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(plan.ChatBody, &chat); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 6 {
+		t.Fatalf("bad message count: %s", plan.ChatBody)
+	}
+	want := []string{"think", "think", missingReasoningPlaceholder}
+	assistant := 0
+	for _, message := range chat.Messages {
+		if message.Role != "assistant" {
+			continue
+		}
+		if message.ReasoningContent == "" {
+			t.Fatalf("assistant turn %d has empty reasoning_content: %s", assistant, plan.ChatBody)
+		}
+		if message.ReasoningContent != want[assistant] {
+			t.Fatalf("assistant turn %d reasoning_content = %q, want %q", assistant, message.ReasoningContent, want[assistant])
+		}
+		assistant++
+	}
+	if assistant != len(want) {
+		t.Fatalf("replayed %d assistant turns, want %d: %s", assistant, len(want), plan.ChatBody)
 	}
 }
 
