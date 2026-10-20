@@ -104,3 +104,26 @@ func TestPrepareChatPassThrough(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepareChatStripsUnsupportedClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"big-pickle","messages":[],"metadata":{"trace":"one"},"client_metadata":{"trace":"two"},"vendor":{"keep":true}}`)
+	for _, compatibility := range []bool{false, true} {
+		prepared, err := prepareChat(body, false, compatibility)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(prepared.body, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := fields["metadata"]; ok {
+			t.Fatalf("metadata was forwarded upstream: %s", prepared.body)
+		}
+		if _, ok := fields["client_metadata"]; ok {
+			t.Fatalf("client_metadata was forwarded upstream: %s", prepared.body)
+		}
+		if string(fields["vendor"]) != `{"keep":true}` {
+			t.Fatalf("unrelated request fields changed: %s", prepared.body)
+		}
+	}
+}

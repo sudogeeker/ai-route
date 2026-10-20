@@ -394,9 +394,11 @@ func TestOpenCodeResponses(t *testing.T) {
 		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
-					Stream     bool              `json:"stream"`
-					Tools      []json.RawMessage `json:"tools"`
-					ToolChoice string            `json:"tool_choice"`
+					Stream         bool              `json:"stream"`
+					Tools          []json.RawMessage `json:"tools"`
+					ToolChoice     string            `json:"tool_choice"`
+					Metadata       json.RawMessage   `json:"metadata"`
+					ClientMetadata json.RawMessage   `json:"client_metadata"`
 				}
 				if r.URL.Path != "/chat/completions" {
 					t.Errorf("unexpected upstream path: %s", r.URL.Path)
@@ -406,7 +408,7 @@ func TestOpenCodeResponses(t *testing.T) {
 					// A canceled losing attempt may not deliver its full body.
 					return
 				}
-				if !request.Stream || len(request.Tools) != 12 || request.ToolChoice != "none" {
+				if !request.Stream || len(request.Tools) != 12 || request.ToolChoice != "none" || len(request.Metadata) != 0 || len(request.ClientMetadata) != 0 {
 					t.Errorf("unexpected upstream Responses request: %+v", request)
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -415,7 +417,7 @@ func TestOpenCodeResponses(t *testing.T) {
 			defer server.Close()
 			p := testOpenCodeProxy(t, server.URL)
 			p.cfg.FreeCompat = true
-			body := fmt.Sprintf(`{"model":"big-pickle","input":"hi","stream":%t}`, streaming)
+			body := fmt.Sprintf(`{"model":"big-pickle","input":"hi","stream":%t,"metadata":{"trace":"one"},"client_metadata":{"trace":"two"}}`, streaming)
 			recorder := httptest.NewRecorder()
 			p.ServeResponses(recorder, httptest.NewRequest(http.MethodPost, routing.OpenCodeResponsesPath, strings.NewReader(body)), []byte(body))
 			if recorder.Code != http.StatusOK {

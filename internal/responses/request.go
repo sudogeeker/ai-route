@@ -228,7 +228,6 @@ func applyChatOptions(chat map[string]json.RawMessage, fields map[string]json.Ra
 		}
 		chat["stream_options"] = marshal(options)
 	}
-	mergeClientMetadata(chat, fields)
 	return nil
 }
 
@@ -260,31 +259,6 @@ func mapTextFormat(raw json.RawMessage) json.RawMessage {
 		return marshal(object{"type": "json_schema", "json_schema": format})
 	default:
 		return marshal(format)
-	}
-}
-
-func mergeClientMetadata(chat map[string]json.RawMessage, fields map[string]json.RawMessage) {
-	merged := make(map[string]json.RawMessage)
-	if raw := fields["metadata"]; present(raw) {
-		var metadata map[string]json.RawMessage
-		if json.Unmarshal(raw, &metadata) == nil {
-			for key, value := range metadata {
-				merged[key] = value
-			}
-		}
-	}
-	if raw := fields["client_metadata"]; present(raw) {
-		var metadata map[string]json.RawMessage
-		if json.Unmarshal(raw, &metadata) == nil {
-			for key, value := range metadata {
-				if _, exists := merged[key]; !exists {
-					merged[key] = value
-				}
-			}
-		}
-	}
-	if len(merged) != 0 {
-		chat["metadata"] = marshal(merged)
 	}
 }
 

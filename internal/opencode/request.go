@@ -86,6 +86,7 @@ type chatRequest struct {
 }
 
 func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error) {
+	body = stripClientMetadata(body)
 	request := chatRequest{body: body, streaming: streaming}
 	if !compatibility {
 		return request, nil
@@ -140,6 +141,28 @@ func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error
 	request.body, err = json.Marshal(fields)
 	request.streaming, request.collect = true, !streaming
 	return request, err
+}
+
+// OpenCode rejects client-supplied metadata even though the public Chat and
+// Responses APIs accept it. Metadata is diagnostic only, so drop the top-level
+// fields while leaving requests without them byte-for-byte unchanged.
+func stripClientMetadata(body []byte) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
+		return body
+	}
+	if _, ok := fields["metadata"]; !ok {
+		if _, ok := fields["client_metadata"]; !ok {
+			return body
+		}
+	}
+	delete(fields, "metadata")
+	delete(fields, "client_metadata")
+	stripped, err := json.Marshal(fields)
+	if err != nil {
+		return body
+	}
+	return stripped
 }
 
 // ensureAgentTools rewrites recognised caller tools to their genuine 2.x

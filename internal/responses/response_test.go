@@ -950,10 +950,11 @@ func TestPrepareMapsExtendedResponseFields(t *testing.T) {
 			IncludeUsage       bool `json:"include_usage"`
 			IncludeObfuscation bool `json:"include_obfuscation"`
 		} `json:"stream_options"`
-		Metadata   map[string]string `json:"metadata"`
-		Store      any               `json:"store"`
-		Background any               `json:"background"`
-		Previous   any               `json:"previous_response_id"`
+		Metadata       map[string]string `json:"metadata"`
+		ClientMetadata map[string]string `json:"client_metadata"`
+		Store          any               `json:"store"`
+		Background     any               `json:"background"`
+		Previous       any               `json:"previous_response_id"`
 	}
 	if err := json.Unmarshal(plan.ChatBody, &chat); err != nil {
 		t.Fatal(err)
@@ -973,8 +974,8 @@ func TestPrepareMapsExtendedResponseFields(t *testing.T) {
 	if !chat.StreamOptions.IncludeUsage || chat.StreamOptions.IncludeObfuscation {
 		t.Fatalf("stream options were not mapped: %s", plan.ChatBody)
 	}
-	if chat.Metadata["a"] != "1" || chat.Metadata["b"] != "2" {
-		t.Fatalf("metadata was not merged: %s", plan.ChatBody)
+	if chat.Metadata != nil || chat.ClientMetadata != nil {
+		t.Fatalf("unsupported client metadata was forwarded upstream: %s", plan.ChatBody)
 	}
 	if chat.Store != nil || chat.Background != nil || chat.Previous != nil {
 		t.Fatalf("stateless-only controls were forwarded: %s", plan.ChatBody)
