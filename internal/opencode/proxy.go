@@ -227,6 +227,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		}
 	}
 	if lastHTTP != nil {
+		if lastHTTP.response.StatusCode == http.StatusTooManyRequests {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "upstream_rate_limit", "OpenCode upstream returned HTTP 429")
+			return
+		}
 		httpx.CopyHeaders(w.Header(), lastHTTP.response.Header)
 		w.WriteHeader(lastHTTP.response.StatusCode)
 		_, _ = w.Write(lastHTTP.body)

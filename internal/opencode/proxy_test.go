@@ -206,8 +206,19 @@ func TestOpenCodeFailuresAllAttempted(t *testing.T) {
 			p := testOpenCodeProxy(t, server.URL)
 			recorder := httptest.NewRecorder()
 			testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
-			if attempts.Load() != 10 || recorder.Code != status || recorder.Body.String() != body || recorder.Header().Get("X-Upstream-Error") != "preserved" {
+			wantStatus := status
+			if status == http.StatusTooManyRequests {
+				wantStatus = http.StatusServiceUnavailable
+			}
+			wantBody := body
+			if status == http.StatusTooManyRequests {
+				wantBody = `{"error":{"message":"OpenCode upstream returned HTTP 429","type":"upstream_rate_limit"}}` + "\n"
+			}
+			if attempts.Load() != 10 || recorder.Code != wantStatus || recorder.Body.String() != wantBody {
 				t.Fatalf("attempts=%d status=%d body=%s", attempts.Load(), recorder.Code, recorder.Body)
+			}
+			if status != http.StatusTooManyRequests && recorder.Header().Get("X-Upstream-Error") != "preserved" {
+				t.Fatalf("upstream headers were not preserved: %v", recorder.Header())
 			}
 		})
 	}
@@ -235,7 +246,7 @@ func TestOpenCodeLastHTTPErrorAfterMixedFailures(t *testing.T) {
 	p := testOpenCodeProxy(t, server.URL)
 	recorder := httptest.NewRecorder()
 	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
-	if recorder.Code != 429 || recorder.Body.String() != "last refusal" {
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Body.String() != `{"error":{"message":"OpenCode upstream returned HTTP 429","type":"upstream_rate_limit"}}`+"\n" {
 		t.Fatalf("wrong final error: %d %s", recorder.Code, recorder.Body)
 	}
 }
