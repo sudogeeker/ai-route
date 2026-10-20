@@ -76,6 +76,7 @@ func TestOpenCodeProductionHTTP1AttemptBudget(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 	p := testOpenCodeProxy(t, server.URL)
+	p.cfg.WaitTimeout = 350 * time.Millisecond
 	p.transport = func(source net.IP) *http.Transport {
 		transport := p.newTransport(source)
 		transport.DialContext = (&net.Dialer{Timeout: time.Second}).DialContext
@@ -84,7 +85,7 @@ func TestOpenCodeProductionHTTP1AttemptBudget(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
-	if attempts.Load() != 10 || recorder.Code != 503 {
+	if attempts.Load() < 20 || attempts.Load()%10 != 0 || recorder.Code != http.StatusGatewayTimeout {
 		t.Fatalf("attempt budget/protocol failed: %d/%d", attempts.Load(), recorder.Code)
 	}
 }

@@ -37,7 +37,7 @@ func TestOpenCodeRequestIdentity(t *testing.T) {
 		lock.Lock()
 		requests = append(requests, r.Header.Clone())
 		lock.Unlock()
-		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"error":{"message":"invalid identity-test response"}}`)
 	}))
 	defer server.Close()
 	p := testOpenCodeProxy(t, server.URL)
@@ -187,56 +187,98 @@ func TestOpenCodeParallelWinnerCancelsAndPreservesBody(t *testing.T) {
 	}
 }
 
-func TestOpenCodeFailuresAllAttempted(t *testing.T) {
-	for _, status := range []int{301, 401, 403, 404, 429, 500, 502, 503} {
+func TestOpenCodeNon200ResponsesRetriedWithinService(t *testing.T) {
+	for _, status := range []int{
+		http.StatusCreated,
+		http.StatusAccepted,
+		http.StatusNoContent,
+		http.StatusMultipleChoices,
+		http.StatusMovedPermanently,
+		http.StatusNotModified,
+		http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusConflict,
+		http.StatusUnprocessableEntity,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			var attempts atomic.Int32
-			body := `{"error":{"type":"FreeTierError","message":"original refusal"}}`
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Authorization") != "Bearer public" {
-					t.Error("keyless request did not use the anonymous credential")
+			var attempts, active, maxActive atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				current := active.Add(1)
+				defer active.Add(-1)
+				for previous := maxActive.Load(); current > previous && !maxActive.CompareAndSwap(previous, current); previous = maxActive.Load() {
 				}
-				attempts.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("X-Upstream-Error", "preserved")
+				if attempts.Add(1) > maxAttempts {
+					io.WriteString(w, openCodeOK)
+					return
+				}
+				w.Header().Set("Retry-After", "3600")
+				w.Header().Set("X-Upstream-Error", "must-not-leak")
 				w.WriteHeader(status)
-				io.WriteString(w, body)
+				io.WriteString(w, `{"error":{"message":"non-200 refusal","request_id":"a4da9182de684e7c-PDX"}}`)
 			}))
 			defer server.Close()
 			p := testOpenCodeProxy(t, server.URL)
 			recorder := httptest.NewRecorder()
 			testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
-			if attempts.Load() != 10 || recorder.Code != status || recorder.Body.String() != body || recorder.Header().Get("X-Upstream-Error") != "preserved" {
-				t.Fatalf("attempts=%d status=%d body=%s", attempts.Load(), recorder.Code, recorder.Body)
+			if recorder.Code != http.StatusOK || recorder.Body.String() != openCodeOK {
+				t.Fatalf("non-200 response reached caller: %d %s", recorder.Code, recorder.Body)
+			}
+			if strings.Contains(recorder.Body.String(), "non-200 refusal") || recorder.Header().Get("Retry-After") != "" || recorder.Header().Get("X-Upstream-Error") != "" {
+				t.Fatalf("upstream non-200 response leaked: headers=%v body=%s", recorder.Header(), recorder.Body)
+			}
+			if attempts.Load() <= maxAttempts {
+				t.Fatalf("service did not start a retry wave: %d attempts", attempts.Load())
+			}
+			if maxActive.Load() > maxAttempts {
+				t.Fatalf("retry waves overlapped: max concurrency %d", maxActive.Load())
 			}
 		})
 	}
 }
 
-func TestOpenCodeLastHTTPErrorAfterMixedFailures(t *testing.T) {
-	var count atomic.Int32
-	ready := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := count.Add(1)
-		if id == 10 {
-			close(ready)
-		}
-		<-ready
-		if id == 10 {
-			time.Sleep(50 * time.Millisecond)
-			w.WriteHeader(429)
-			io.WriteString(w, "last refusal")
-			return
-		}
-		w.WriteHeader(403)
-		io.WriteString(w, "earlier refusal")
-	}))
-	defer server.Close()
-	p := testOpenCodeProxy(t, server.URL)
-	recorder := httptest.NewRecorder()
-	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
-	if recorder.Code != 429 || recorder.Body.String() != "last refusal" {
-		t.Fatalf("wrong final error: %d %s", recorder.Code, recorder.Body)
+func TestOpenCodeNon200ResponsesNeverReachCaller(t *testing.T) {
+	for _, status := range []int{
+		http.StatusCreated,
+		http.StatusMovedPermanently,
+		http.StatusUnauthorized,
+		http.StatusNotFound,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				attempts.Add(1)
+				w.Header().Set("Retry-After", "3600")
+				w.WriteHeader(status)
+				io.WriteString(w, `{"error":{"message":"exceeded retry limit","request_id":"a4da9182de684e7c-PDX"}}`)
+			}))
+			defer server.Close()
+			p := testOpenCodeProxy(t, server.URL)
+			p.cfg.WaitTimeout = 350 * time.Millisecond
+			recorder := httptest.NewRecorder()
+			testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
+			if recorder.Code == status {
+				t.Fatalf("non-200 status reached caller: %d %s", recorder.Code, recorder.Body)
+			}
+			if recorder.Code != http.StatusGatewayTimeout {
+				t.Fatalf("unexpected exhausted retry status: %d %s", recorder.Code, recorder.Body)
+			}
+			if attempts.Load() < maxAttempts*2 {
+				t.Fatalf("service did not retry repeatedly: %d attempts", attempts.Load())
+			}
+			if strings.Contains(recorder.Body.String(), "retry limit") || recorder.Header().Get("Retry-After") != "" {
+				t.Fatalf("non-200 response leaked: headers=%v body=%s", recorder.Header(), recorder.Body)
+			}
+		})
 	}
 }
 

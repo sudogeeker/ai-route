@@ -63,9 +63,10 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	}
 	result.response = resp
 	result.cleanup = func() { resp.Body.Close(); transport.CloseIdleConnections() }
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
-		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		// OpenCode only produces a usable chat response with HTTP 200. Ignore
+		// every other status without buffering its potentially large body.
+		result.err = fmt.Errorf("retryable upstream HTTP %d", resp.StatusCode)
 		return result
 	}
 	if request.complete != nil {

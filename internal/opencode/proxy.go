@@ -18,9 +18,10 @@ import (
 const (
 	maxAttempts      = 10
 	maxCompatRetries = 2
-	maxErrorBytes    = 1 << 20
 	maxEventBytes    = 1 << 20
 	maxResponseBytes = 64 << 20
+	initialRetryWait = 100 * time.Millisecond
+	maxRetryWait     = 2 * time.Second
 )
 
 // Proxy owns OpenCode racing and keeps its transport and AAAA state isolated.
@@ -139,98 +140,114 @@ func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan
 }
 
 // serve owns the ten-way race and hands the winning transport response to the
-// protocol-specific writer. The winner remains readable until deliver returns.
+// protocol-specific writer. A completed wave is fully drained before another
+// starts, so retries retain a fixed concurrency and response-body footprint.
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatRequest, identity requestIdentity, deliver func(http.ResponseWriter, *attemptResult)) {
-	sources, err := p.sources(maxAttempts)
-	if err != nil || len(sources) != maxAttempts {
-		httpx.WriteError(w, http.StatusBadGateway, "connection_error", "Cannot allocate OpenCode source IPv6 addresses")
-		return
-	}
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-	cancels := make([]context.CancelFunc, maxAttempts)
 	type numberedResult struct {
 		index  int
 		result attemptResult
 	}
-	numbered := make(chan numberedResult, maxAttempts)
-	for index, source := range sources {
-		attemptCtx, attemptCancel := context.WithCancel(ctx)
-		cancels[index] = attemptCancel
-		go func(index int, source net.IP) {
-			numbered <- numberedResult{index: index, result: p.attempt(attemptCtx, source, request, identity)}
-		}(index, source)
-	}
-	received, winner := 0, -1
-	defer func() {
-		for index, stop := range cancels {
-			if index != winner {
-				stop()
-			}
-		}
-		// Results already in flight still own response bodies, including other winners.
-		if received < maxAttempts {
-			go func(remaining int) {
-				for i := 0; i < remaining; i++ {
-					result := <-numbered
-					result.result.cleanup()
-				}
-			}(maxAttempts - received)
-		}
-	}()
 	timer := time.NewTimer(p.cfg.WaitTimeout)
 	defer timer.Stop()
-	var lastHTTP *attemptResult
-	for received < maxAttempts {
-		select {
-		case <-r.Context().Done():
+	retryWait := initialRetryWait
+	for {
+		sources, err := p.sources(maxAttempts)
+		if err != nil || len(sources) != maxAttempts {
+			httpx.WriteError(w, http.StatusBadGateway, "connection_error", "Cannot allocate OpenCode source IPv6 addresses")
 			return
-		case <-timer.C:
-			httpx.WriteError(w, http.StatusGatewayTimeout, "timeout_error", "OpenCode race timed out")
-			return
-		case outcome := <-numbered:
+		}
+		waveCtx, cancelWave := context.WithCancel(r.Context())
+		cancels := make([]context.CancelFunc, maxAttempts)
+		numbered := make(chan numberedResult, maxAttempts)
+		for index, source := range sources {
+			attemptCtx, attemptCancel := context.WithCancel(waveCtx)
+			cancels[index] = attemptCancel
+			go func(index int, source net.IP) {
+				numbered <- numberedResult{index: index, result: p.attempt(attemptCtx, source, request, identity)}
+			}(index, source)
+		}
+
+		received := 0
+		retryable := false
+		for received < maxAttempts {
+			var outcome numberedResult
+			select {
+			case <-r.Context().Done():
+				cancelWave()
+				for received < maxAttempts {
+					pending := <-numbered
+					pending.result.cleanup()
+					received++
+				}
+				return
+			case <-timer.C:
+				cancelWave()
+				for received < maxAttempts {
+					pending := <-numbered
+					pending.result.cleanup()
+					received++
+				}
+				httpx.WriteError(w, http.StatusGatewayTimeout, "timeout_error", "OpenCode race timed out")
+				return
+			case outcome = <-numbered:
+			}
 			received++
 			result := outcome.result
+			status := 0
+			if result.response != nil {
+				status = result.response.StatusCode
+			}
 			if p.logger != nil {
-				status := 0
-				if result.response != nil {
-					status = result.response.StatusCode
-				}
 				p.logger.Debugf("OpenCode attempt=%d source=%s status=%d failed=%t", outcome.index+1, sources[outcome.index], status, result.err != nil)
 			}
 			if result.err != nil {
-				if result.response != nil && (result.response.StatusCode < 200 || result.response.StatusCode >= 300) {
-					copy := result
-					lastHTTP = &copy
+				if result.response != nil && status != http.StatusOK {
+					retryable = true
 				}
 				result.cleanup()
 				continue
 			}
-			winner = outcome.index
 			for index, stop := range cancels {
-				if index != winner {
+				if index != outcome.index {
 					stop()
 				}
 			}
-			remaining := maxAttempts - received
-			go func() {
-				for i := 0; i < remaining; i++ {
-					pending := <-numbered
-					pending.result.cleanup()
-				}
-			}()
-			received = maxAttempts
+			// Keep exactly one winner readable, but wait for every loser to close
+			// its body before returning. This prevents retry waves from stacking
+			// goroutines or response buffers.
+			for received < maxAttempts {
+				pending := <-numbered
+				pending.result.cleanup()
+				received++
+			}
 			timer.Stop()
-			defer result.cleanup()
 			deliver(w, &result)
+			cancelWave()
+			result.cleanup()
 			return
 		}
+		cancelWave()
+		if !retryable {
+			httpx.WriteError(w, http.StatusBadGateway, "upstream_error", "All 10 OpenCode attempts failed without a valid response")
+			return
+		}
+
+		retryTimer := time.NewTimer(retryWait)
+		select {
+		case <-r.Context().Done():
+			retryTimer.Stop()
+			return
+		case <-timer.C:
+			retryTimer.Stop()
+			httpx.WriteError(w, http.StatusGatewayTimeout, "timeout_error", "OpenCode race timed out")
+			return
+		case <-retryTimer.C:
+		}
+		if retryWait < maxRetryWait {
+			retryWait *= 2
+			if retryWait > maxRetryWait {
+				retryWait = maxRetryWait
+			}
+		}
 	}
-	if lastHTTP != nil {
-		httpx.CopyHeaders(w.Header(), lastHTTP.response.Header)
-		w.WriteHeader(lastHTTP.response.StatusCode)
-		_, _ = w.Write(lastHTTP.body)
-		return
-	}
-	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", "All 10 OpenCode attempts failed without a valid response")
 }
