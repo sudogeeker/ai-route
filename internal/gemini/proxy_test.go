@@ -45,6 +45,7 @@ func TestLiveWebSocketProxy(t *testing.T) {
 		t.Run(fmt.Sprint(level), func(t *testing.T) {
 			var logs bytes.Buffer
 			logger := logging.New(level, &logs)
+			defer logger.Close()
 			upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != livePath || r.URL.RawQuery != "key=synthetic%2Fkey%2Bvalue" || r.Header.Get("Upgrade") != "websocket" || r.ProtoMajor != 1 || r.Host == "gapi.example.com" {
 					t.Errorf("unexpected upstream request: %s %s host=%s", r.Proto, r.URL, r.Host)
@@ -135,6 +136,9 @@ func TestLiveWebSocketProxy(t *testing.T) {
 				t.Fatal("proxy did not finish after socket close")
 			}
 			if level <= logging.LevelInfo {
+				if err := logger.Close(); err != nil {
+					t.Fatal(err)
+				}
 				if !strings.Contains(logs.String(), "[101]") || !strings.Contains(logs.String(), "[REDACTED]") || strings.Contains(logs.String(), "synthetic") {
 					t.Fatalf("unexpected upgrade log: %s", &logs)
 				}

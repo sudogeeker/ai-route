@@ -18,11 +18,16 @@ const (
 type Logger struct {
 	level  int
 	logger *log.Logger
-	file   *os.File
+	output *asyncWriter
 }
 
 func New(level int, writer io.Writer) *Logger {
-	return &Logger{level: level, logger: log.New(writer, "", log.LstdFlags|log.Lmicroseconds)}
+	return newLogger(level, writer, nil)
+}
+
+func newLogger(level int, writer io.Writer, closeOutput func() error) *Logger {
+	output := newAsyncWriter(writer, closeOutput)
+	return &Logger{level: level, logger: log.New(output, "", log.LstdFlags|log.Lmicroseconds), output: output}
 }
 func Open(level, path string) (*Logger, error) {
 	severity := LevelError
@@ -34,7 +39,8 @@ func Open(level, path string) (*Logger, error) {
 	case "WARN":
 		severity = LevelWarn
 	}
-	logger := New(severity, os.Stdout)
+	var writer io.Writer = os.Stdout
+	var closeOutput func() error
 	if path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return nil, err
@@ -43,16 +49,13 @@ func Open(level, path string) (*Logger, error) {
 		if err != nil {
 			return nil, err
 		}
-		logger.file = file
-		logger.logger.SetOutput(io.MultiWriter(os.Stdout, file))
+		writer = io.MultiWriter(os.Stdout, file)
+		closeOutput = file.Close
 	}
-	return logger, nil
+	return newLogger(severity, writer, closeOutput), nil
 }
 func (l *Logger) Close() error {
-	if l.file != nil {
-		return l.file.Close()
-	}
-	return nil
+	return l.output.Close()
 }
 func (l *Logger) Enabled(level int) bool { return l.level <= level }
 

@@ -24,8 +24,9 @@ type attemptResult struct {
 }
 
 func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest, identity requestIdentity) attemptResult {
+	ctx, cancel := context.WithCancel(ctx)
 	transport := p.transport(source)
-	result := attemptResult{cleanup: transport.CloseIdleConnections}
+	result := attemptResult{cleanup: func() { cancel(); transport.CloseIdleConnections() }}
 	target := *p.cfg.BaseURL
 	target.Path += "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(request.body))
@@ -62,7 +63,8 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 		return result
 	}
 	result.response = resp
-	result.cleanup = func() { resp.Body.Close(); transport.CloseIdleConnections() }
+	resp.Body = newIdleResponseBody(resp.Body, p.streamIdleTimeout(), cancel)
+	result.cleanup = func() { cancel(); resp.Body.Close(); transport.CloseIdleConnections() }
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
@@ -137,7 +139,31 @@ func validChat(data []byte, streaming bool) (bool, error) {
 	for _, choice := range envelope.Choices {
 		var object map[string]json.RawMessage
 		if json.Unmarshal(choice[field], &object) == nil && len(object) != 0 {
-			return true, nil
+			if !streaming {
+				return true, nil
+			}
+			// A role-only prelude must not cancel nine alternatives before
+			// this attempt has produced any output.
+			for _, key := range []string{"content", "reasoning_content", "reasoning", "reasoning_text", "tool_calls", "function_call", "refusal", "audio"} {
+				var value any
+				if json.Unmarshal(object[key], &value) != nil {
+					continue
+				}
+				switch value := value.(type) {
+				case string:
+					if value != "" {
+						return true, nil
+					}
+				case []any:
+					if len(value) != 0 {
+						return true, nil
+					}
+				case map[string]any:
+					if len(value) != 0 {
+						return true, nil
+					}
+				}
+			}
 		}
 	}
 	return false, nil

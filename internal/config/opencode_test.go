@@ -7,7 +7,7 @@ import (
 )
 
 func TestOpenCodeConfig(t *testing.T) {
-	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_MAX_BODY_BYTES"} {
+	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_MAX_BODY_BYTES"} {
 		t.Setenv(key, "")
 	}
 	os.Unsetenv("OPENCODE_MODELS")
@@ -18,12 +18,13 @@ func TestOpenCodeConfig(t *testing.T) {
 	// An explicitly empty allowlist is invalid; use a small operator-supplied list here.
 	t.Setenv("OPENCODE_MODELS", "big-pickle,mimo-v2.6-flash-free")
 	cfg, err := loadOpenCode()
-	if err != nil || len(cfg.Models) != 2 || cfg.WaitTimeout != 120*time.Second || cfg.MaxBodyBytes != 64<<20 {
+	if err != nil || len(cfg.Models) != 2 || cfg.WaitTimeout != 120*time.Second || cfg.StreamIdleTimeout != 60*time.Second || cfg.MaxBodyBytes != 64<<20 {
 		t.Fatalf("bad config: %+v %v", cfg, err)
 	}
 	for _, setting := range []struct{ key, value string }{
 		{"OPENCODE_BASE_URL", "http://example.com"}, {"OPENCODE_BASE_URL", "https://key@example.com"}, {"OPENCODE_BASE_URL", "https://example.com?key=secret"},
 		{"OPENCODE_WAIT_TIMEOUT", "0s"}, {"OPENCODE_MAX_BODY_BYTES", "-1"}, {"OPENCODE_MODELS", ""}, {"OPENCODE_MODELS", "opencode/big-pickle"},
+		{"OPENCODE_STREAM_IDLE_TIMEOUT", "0s"}, {"OPENCODE_STREAM_IDLE_TIMEOUT", "invalid"},
 		{"OPENCODE_FREE_COMPAT", "invalid"},
 	} {
 		t.Run(setting.key+setting.value, func(t *testing.T) {
@@ -32,6 +33,10 @@ func TestOpenCodeConfig(t *testing.T) {
 				t.Fatal("invalid setting accepted")
 			}
 		})
+	}
+	t.Setenv("OPENCODE_STREAM_IDLE_TIMEOUT", "15s")
+	if cfg, err := loadOpenCode(); err != nil || cfg.StreamIdleTimeout != 15*time.Second {
+		t.Fatalf("cannot configure stream idle timeout: %+v %v", cfg, err)
 	}
 	t.Setenv("OPENCODE_FREE_COMPAT", "false")
 	if cfg, err := loadOpenCode(); err != nil || cfg.FreeCompat {

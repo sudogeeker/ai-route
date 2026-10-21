@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"aizasy.pages.dev/ai-route/internal/httpx"
 )
@@ -233,14 +235,27 @@ func openCodeAuthorized(r *http.Request, key string) bool {
 }
 
 func readBody(w http.ResponseWriter, r *http.Request, maxBodyBytes int64, message string) ([]byte, bool) {
+	return readBodyWithin(w, r, maxBodyBytes, message, 30*time.Second)
+}
+
+func readBodyWithin(w http.ResponseWriter, r *http.Request, maxBodyBytes int64, message string, timeout time.Duration) ([]byte, bool) {
+	// Limit JSON uploads before the provider's race timer starts. Clear this
+	// deadline afterwards so long SSE responses and keep-alive requests work.
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(timeout))
+	defer controller.SetReadDeadline(time.Time{})
 	originalBody := r.Body
 	body, err := io.ReadAll(http.MaxBytesReader(w, originalBody, maxBodyBytes))
 	originalBody.Close()
 	if err != nil {
 		status := http.StatusBadRequest
 		var tooLarge *http.MaxBytesError
+		var timeoutErr net.Error
 		if errors.As(err, &tooLarge) {
 			status = http.StatusRequestEntityTooLarge
+		} else if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
+			status = http.StatusRequestTimeout
+			message = "Timed out reading the request body"
 		}
 		httpx.WriteError(w, status, "invalid_request_error", message)
 		return nil, false

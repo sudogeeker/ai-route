@@ -2,7 +2,6 @@ package opencode
 
 import (
 	"context"
-	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -54,7 +53,15 @@ func (p *Proxy) Models() []string {
 	return models
 }
 
+func (p *Proxy) streamIdleTimeout() time.Duration {
+	if p.cfg.StreamIdleTimeout > 0 {
+		return p.cfg.StreamIdleTimeout
+	}
+	return 60 * time.Second
+}
+
 func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, streaming bool) {
+	w = httpx.DeadlineWriter{ResponseWriter: w, Timeout: p.streamIdleTimeout()}
 	request, err := prepareChat(body, streaming, p.cfg.FreeCompat)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -69,7 +76,9 @@ func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, s
 		httpx.CopyHeaders(w.Header(), result.response.Header)
 		w.WriteHeader(result.response.StatusCode)
 		if streaming {
-			_, _ = io.Copy(httpx.FlushWriter{ResponseWriter: w}, result.stream)
+			if err := copyChatStream(httpx.FlushWriter{ResponseWriter: w}, result.stream); err != nil && p.logger != nil && r.Context().Err() == nil {
+				p.logger.Errorf("OpenCode chat stream failed: %v", err)
+			}
 		} else {
 			_, _ = w.Write(result.body)
 		}
@@ -79,6 +88,7 @@ func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, s
 // ServeResponses translates stateless Responses API calls into the same Chat
 // Completions races used by the direct chat endpoint.
 func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request, body []byte) {
+	w = httpx.DeadlineWriter{ResponseWriter: w, Timeout: p.streamIdleTimeout()}
 	padding := chatTools
 	if requestHasTools(body) {
 		padding = chatCoreTools
@@ -103,6 +113,9 @@ func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan
 	p.serve(w, r, chatRequest{body: body, streaming: true}, identity, func(w http.ResponseWriter, result *attemptResult) {
 		compat, stream, err := plan.ProbeCompat(result.stream)
 		if err != nil {
+			if p.logger != nil && r.Context().Err() == nil {
+				p.logger.Errorf("OpenCode Responses prelude failed: %v", err)
+			}
 			httpx.WriteError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}
@@ -124,11 +137,16 @@ func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(http.StatusOK)
-			_ = plan.WriteStream(stream, httpx.FlushWriter{ResponseWriter: w})
+			if err := plan.WriteStream(stream, httpx.FlushWriter{ResponseWriter: w}); err != nil && p.logger != nil && r.Context().Err() == nil {
+				p.logger.Errorf("OpenCode Responses stream failed: %v", err)
+			}
 			return
 		}
 		data, err := plan.Complete(stream)
 		if err != nil {
+			if p.logger != nil && r.Context().Err() == nil {
+				p.logger.Errorf("OpenCode Responses collection failed: %v", err)
+			}
 			httpx.WriteError(w, http.StatusBadGateway, "upstream_error", err.Error())
 			return
 		}
@@ -181,11 +199,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 	timer := time.NewTimer(p.cfg.WaitTimeout)
 	defer timer.Stop()
 	var lastHTTP *attemptResult
+	var lastErr error
 	for received < maxAttempts {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-timer.C:
+			if p.logger != nil {
+				p.logger.Errorf("OpenCode race timed out after %s: %v", p.cfg.WaitTimeout, lastErr)
+			}
 			httpx.WriteError(w, http.StatusGatewayTimeout, "timeout_error", "OpenCode race timed out")
 			return
 		case outcome := <-numbered:
@@ -196,9 +218,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 				if result.response != nil {
 					status = result.response.StatusCode
 				}
-				p.logger.Debugf("OpenCode attempt=%d source=%s status=%d failed=%t", outcome.index+1, sources[outcome.index], status, result.err != nil)
+				p.logger.Debugf("OpenCode attempt=%d source=%s status=%d error=%v", outcome.index+1, sources[outcome.index], status, result.err)
 			}
 			if result.err != nil {
+				lastErr = result.err
 				if result.response != nil && (result.response.StatusCode < 200 || result.response.StatusCode >= 300) {
 					copy := result
 					lastHTTP = &copy
@@ -225,6 +248,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 			deliver(w, &result)
 			return
 		}
+	}
+	if p.logger != nil {
+		p.logger.Errorf("All OpenCode attempts failed: %v", lastErr)
 	}
 	if lastHTTP != nil {
 		if lastHTTP.response.StatusCode == http.StatusTooManyRequests {

@@ -30,12 +30,13 @@ func loadOpenCode() (OpenCode, error) {
 		authKey = os.Getenv("opencode_auth_key")
 	}
 	cfg := OpenCode{
-		APIKey:       os.Getenv("OPENCODE_API_KEY"),
-		AuthKey:      strings.TrimSpace(authKey),
-		FreeCompat:   true,
-		Models:       make(map[string]bool),
-		WaitTimeout:  120 * time.Second,
-		MaxBodyBytes: 64 << 20,
+		APIKey:            os.Getenv("OPENCODE_API_KEY"),
+		AuthKey:           strings.TrimSpace(authKey),
+		FreeCompat:        true,
+		Models:            make(map[string]bool),
+		WaitTimeout:       120 * time.Second,
+		StreamIdleTimeout: 60 * time.Second,
+		MaxBodyBytes:      64 << 20,
 	}
 	base := os.Getenv("OPENCODE_BASE_URL")
 	if base == "" {
@@ -72,6 +73,12 @@ func loadOpenCode() (OpenCode, error) {
 		cfg.WaitTimeout, err = time.ParseDuration(raw)
 		if err != nil || cfg.WaitTimeout <= 0 {
 			return cfg, errors.New("OPENCODE_WAIT_TIMEOUT must be a positive duration, e.g. 120s")
+		}
+	}
+	if raw := os.Getenv("OPENCODE_STREAM_IDLE_TIMEOUT"); raw != "" {
+		cfg.StreamIdleTimeout, err = time.ParseDuration(raw)
+		if err != nil || cfg.StreamIdleTimeout <= 0 {
+			return cfg, errors.New("OPENCODE_STREAM_IDLE_TIMEOUT must be a positive duration, e.g. 60s")
 		}
 	}
 	if raw := os.Getenv("OPENCODE_MAX_BODY_BYTES"); raw != "" {

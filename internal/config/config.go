@@ -25,13 +25,14 @@ type Gemini struct {
 }
 
 type OpenCode struct {
-	BaseURL      *url.URL
-	APIKey       string
-	AuthKey      string
-	FreeCompat   bool
-	Models       map[string]bool
-	WaitTimeout  time.Duration
-	MaxBodyBytes int64
+	BaseURL           *url.URL
+	APIKey            string
+	AuthKey           string
+	FreeCompat        bool
+	Models            map[string]bool
+	WaitTimeout       time.Duration
+	StreamIdleTimeout time.Duration
+	MaxBodyBytes      int64
 }
 
 // Load preserves environment defaults followed by explicit command-line overrides.

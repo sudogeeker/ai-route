@@ -44,7 +44,11 @@ func Run(ctx context.Context, cfg config.Config) error {
 	router := server.NewRouter(google.Handler(), free, cfg.OpenCode.AuthKey, cfg.OpenCode.MaxBodyBytes)
 	// Keep the original path allowlist outside logging and both provider handlers.
 	handler := gemini.Allowlist(logger.Middleware(router))
-	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: handler}
+	httpServer := &http.Server{
+		Addr: cfg.ListenAddr, Handler: handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
 	finished := make(chan error, 1)
 	go func() { finished <- httpServer.ListenAndServe() }()
 	fmt.Printf("%s started on %s (Level: %s)\n", config.AppName, cfg.ListenAddr, cfg.LogLevel)
