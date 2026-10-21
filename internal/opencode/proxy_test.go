@@ -89,10 +89,11 @@ func testOpenCodeProxy(t *testing.T, upstreamURL string) *Proxy {
 		BaseURL: u, Models: map[string]bool{"big-pickle": true},
 		WaitTimeout: 2 * time.Second, MaxBodyBytes: 64 << 20,
 	}, nil, nil)
+	var nextSource atomic.Uint64
 	p.sources = func(count int) ([]net.IP, error) {
 		var sources []net.IP
 		for i := 0; i < count; i++ {
-			sources = append(sources, net.ParseIP(fmt.Sprintf("2001:db8::%x", i+1)))
+			sources = append(sources, net.ParseIP(fmt.Sprintf("2001:db8::%x", nextSource.Add(1))))
 		}
 		return sources, nil
 	}

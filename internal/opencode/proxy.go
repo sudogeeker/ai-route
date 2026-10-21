@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,11 +25,12 @@ const (
 
 // Proxy owns OpenCode racing and keeps its transport and AAAA state isolated.
 type Proxy struct {
-	cfg       config.OpenCode
-	logger    *logging.Logger
-	dns       *dnsCache
-	sources   func(int) ([]net.IP, error)
-	transport func(net.IP) *http.Transport
+	cfg             config.OpenCode
+	logger          *logging.Logger
+	dns             *dnsCache
+	sources         func(int) ([]net.IP, error)
+	transport       func(net.IP) *http.Transport
+	firstTokenGrace func() time.Duration
 }
 
 func New(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
@@ -80,6 +82,23 @@ func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, s
 		return
 	}
 	p.serve(w, r, request, identity, func(w http.ResponseWriter, result *attemptResult) {
+		if request.collect {
+			// Race on the first token even for JSON clients. Only the winner
+			// is collected to completion, without a first-token deadline.
+			var err error
+			result.body, err = collectChat(result.stream)
+			if err != nil {
+				if p.logger != nil && r.Context().Err() == nil {
+					p.logger.Errorf("OpenCode chat collection failed: %v", err)
+				}
+				httpx.WriteError(w, http.StatusBadGateway, "upstream_error", err.Error())
+				return
+			}
+			result.response.Header.Set("Content-Type", "application/json")
+			for _, key := range []string{"Content-Encoding", "ETag", "Content-MD5", "Digest", "Content-Digest"} {
+				result.response.Header.Del(key)
+			}
+		}
 		httpx.CopyHeaders(w.Header(), result.response.Header)
 		w.WriteHeader(result.response.StatusCode)
 		if streaming {
@@ -180,35 +199,63 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		result attemptResult
 	}
 	numbered := make(chan numberedResult, maxAttempts)
-	for index, source := range sources {
+	inflight, launched, winner := 0, 0, -1
+	usedSources := make(map[string]bool, maxAttempts)
+	launch := func(index int, source net.IP) {
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		cancels[index] = attemptCancel
+		sources[index] = source
+		usedSources[source.String()] = true
+		inflight++
+		launched++
 		go func(index int, source net.IP) {
 			numbered <- numberedResult{index: index, result: p.attempt(attemptCtx, source, request, identity)}
 		}(index, source)
 	}
-	received, winner := 0, -1
+	for index, source := range sources {
+		launch(index, source)
+	}
+	nextSource := func() (net.IP, error) {
+		for i := 0; i < 128; i++ {
+			fresh, err := p.sources(1)
+			if err != nil {
+				return nil, err
+			}
+			if len(fresh) != 1 {
+				return nil, errors.New("Cannot allocate OpenCode replacement source IPv6 address")
+			}
+			if !usedSources[fresh[0].String()] {
+				return fresh[0], nil
+			}
+		}
+		return nil, errors.New("Cannot allocate a fresh OpenCode replacement source IPv6 address")
+	}
+	drain := func() {
+		// Each launched attempt sends exactly one result. Drain cancelled
+		// attempts immediately so response bodies do not wait for delivery.
+		if inflight > 0 {
+			go func(remaining int) {
+				for i := 0; i < remaining; i++ {
+					pending := <-numbered
+					pending.result.cleanup()
+				}
+			}(inflight)
+			inflight = 0
+		}
+	}
 	defer func() {
 		for index, stop := range cancels {
-			if index != winner {
+			if index != winner && stop != nil {
 				stop()
 			}
 		}
-		// Results already in flight still own response bodies, including other winners.
-		if received < maxAttempts {
-			go func(remaining int) {
-				for i := 0; i < remaining; i++ {
-					result := <-numbered
-					result.result.cleanup()
-				}
-			}(maxAttempts - received)
-		}
+		drain()
 	}()
 	timer := time.NewTimer(p.cfg.WaitTimeout)
 	defer timer.Stop()
 	var lastHTTP *attemptResult
 	var lastErr error
-	for received < maxAttempts {
+	for inflight > 0 {
 		select {
 		case <-r.Context().Done():
 			return
@@ -219,8 +266,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 			httpx.WriteError(w, http.StatusGatewayTimeout, "timeout_error", "OpenCode race timed out")
 			return
 		case outcome := <-numbered:
-			received++
+			inflight--
 			result := outcome.result
+			if r.Context().Err() != nil {
+				result.cleanup()
+				return
+			}
 			if p.logger != nil {
 				status := 0
 				if result.response != nil {
@@ -235,22 +286,27 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 					lastHTTP = &copy
 				}
 				result.cleanup()
+				cancels[outcome.index]()
+				cancels[outcome.index] = nil
+				if errors.Is(result.err, errFirstTokenTimeout) && ctx.Err() == nil {
+					source, err := nextSource()
+					if err != nil {
+						lastErr = err
+					} else {
+						// Refill only this expired slot. Other attempts retain
+						// their own grace periods and can still win.
+						launch(outcome.index, source)
+					}
+				}
 				continue
 			}
 			winner = outcome.index
 			for index, stop := range cancels {
-				if index != winner {
+				if index != winner && stop != nil {
 					stop()
 				}
 			}
-			remaining := maxAttempts - received
-			go func() {
-				for i := 0; i < remaining; i++ {
-					pending := <-numbered
-					pending.result.cleanup()
-				}
-			}()
-			received = maxAttempts
+			drain()
 			timer.Stop()
 			defer result.cleanup()
 			deliver(w, &result)
@@ -258,7 +314,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		}
 	}
 	if p.logger != nil {
-		p.logger.Errorf("All %d OpenCode attempts failed: %v", maxAttempts, lastErr)
+		p.logger.Errorf("All %d OpenCode attempts failed: %v", launched, lastErr)
 	}
 	if lastHTTP != nil {
 		if lastHTTP.response.StatusCode == http.StatusTooManyRequests {
@@ -270,5 +326,5 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		_, _ = w.Write(lastHTTP.body)
 		return
 	}
-	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", fmt.Sprintf("All %d OpenCode attempts failed without a valid response", maxAttempts))
+	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", fmt.Sprintf("All %d OpenCode attempts failed without a valid response", launched))
 }

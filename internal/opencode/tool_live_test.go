@@ -52,6 +52,9 @@ func TestOpenCodeLiveToolRoundTrip(t *testing.T) {
 		}
 		result := p.attempt(ctx, net.IPv6loopback, chatRequest{body: encoded, streaming: true, collect: collect}, identity)
 		t.Cleanup(result.cleanup)
+		if collect && result.err == nil {
+			result.body, result.err = collectChat(result.stream)
+		}
 		return result
 	}
 	// First observe the ordinary caller-supplied tool path without padding.

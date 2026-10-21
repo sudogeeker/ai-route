@@ -23,10 +23,18 @@ type attemptResult struct {
 	cleanup  func()
 }
 
-func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest, identity requestIdentity) attemptResult {
-	ctx, cancel := context.WithCancel(ctx)
+func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest, identity requestIdentity) (result attemptResult) {
+	ctx, cancelCause := context.WithCancelCause(ctx)
+	cancel := func() { cancelCause(context.Canceled) }
+	grace := p.firstTokenTimeout()
+	deadline := newFirstTokenDeadline(grace, cancelCause)
+	defer func() {
+		if deadline.stop() {
+			result.err = fmt.Errorf("%w after %s", errFirstTokenTimeout, grace)
+		}
+	}()
 	transport := p.transport(source)
-	result := attemptResult{cleanup: func() { cancel(); transport.CloseIdleConnections() }}
+	result.cleanup = func() { cancel(); transport.CloseIdleConnections() }
 	target := *p.cfg.BaseURL
 	target.Path += "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(request.body))
@@ -68,30 +76,6 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
-		return result
-	}
-	if request.complete != nil {
-		result.body, result.err = request.complete(resp.Body)
-		if result.err == nil {
-			resp.Header.Set("Content-Type", "application/json")
-			resp.Header.Del("Content-Encoding")
-			resp.Header.Del("ETag")
-			resp.Header.Del("Content-MD5")
-			resp.Header.Del("Digest")
-			resp.Header.Del("Content-Digest")
-		}
-		return result
-	}
-	if request.collect {
-		result.body, result.err = collectChat(resp.Body)
-		if result.err == nil {
-			resp.Header.Set("Content-Type", "application/json")
-			resp.Header.Del("Content-Encoding")
-			resp.Header.Del("ETag")
-			resp.Header.Del("Content-MD5")
-			resp.Header.Del("Digest")
-			resp.Header.Del("Content-Digest")
-		}
 		return result
 	}
 	if request.streaming {
@@ -138,35 +122,57 @@ func validChat(data []byte, streaming bool) (bool, error) {
 	}
 	for _, choice := range envelope.Choices {
 		var object map[string]json.RawMessage
-		if json.Unmarshal(choice[field], &object) == nil && len(object) != 0 {
-			if !streaming {
-				return true, nil
-			}
-			// A role-only prelude must not cancel nine alternatives before
-			// this attempt has produced any output.
-			for _, key := range []string{"content", "reasoning_content", "reasoning", "reasoning_text", "tool_calls", "function_call", "refusal", "audio"} {
-				var value any
-				if json.Unmarshal(object[key], &value) != nil {
-					continue
-				}
-				switch value := value.(type) {
-				case string:
-					if value != "" {
-						return true, nil
-					}
-				case []any:
-					if len(value) != 0 {
-						return true, nil
-					}
-				case map[string]any:
-					if len(value) != 0 {
-						return true, nil
+		if json.Unmarshal(choice[field], &object) == nil && hasChatOutput(object) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasChatOutput(object map[string]json.RawMessage) bool {
+	for _, key := range []string{"content", "reasoning_content", "reasoning", "reasoning_text", "refusal"} {
+		if hasOutputText(object[key]) {
+			return true
+		}
+	}
+	var calls []map[string]json.RawMessage
+	_ = json.Unmarshal(object["tool_calls"], &calls)
+	calls = append(calls, map[string]json.RawMessage{"function": object["function_call"]})
+	for _, call := range calls {
+		for _, kind := range []string{"function", "custom"} {
+			var tool map[string]json.RawMessage
+			if json.Unmarshal(call[kind], &tool) == nil {
+				for _, field := range []string{"name", "arguments", "input"} {
+					if hasOutputText(tool[field]) {
+						return true
 					}
 				}
 			}
 		}
 	}
-	return false, nil
+	var audio map[string]json.RawMessage
+	if json.Unmarshal(object["audio"], &audio) == nil {
+		return hasOutputText(audio["data"]) || hasOutputText(audio["transcript"])
+	}
+	return false
+}
+
+// Content parts must contain actual text; IDs, indexes and type fields alone
+// are only metadata, even when enclosed in nonempty arrays or objects.
+func hasOutputText(raw json.RawMessage) bool {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text != ""
+	}
+	var parts []map[string]json.RawMessage
+	if json.Unmarshal(raw, &parts) == nil {
+		for _, part := range parts {
+			if hasOutputText(part["text"]) || hasOutputText(part["refusal"]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Preserve every byte read (including comments and CRLF) and the reader's buffered tail.

@@ -61,7 +61,7 @@ func TestOpenCodeLiveFreeChat(t *testing.T) {
 				t.Fatalf("live anonymous request failed: %v %s", result.err, result.body)
 			}
 			data := result.body
-			if streaming {
+			if request.streaming {
 				data, err = collectChat(result.stream)
 				if err != nil {
 					t.Fatal(err)

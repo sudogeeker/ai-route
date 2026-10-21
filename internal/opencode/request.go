@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"io"
 )
 
 // toolsJSON holds the OpenCode 2.x CLI tool definitions. The inference free
@@ -82,7 +81,6 @@ type chatRequest struct {
 	body      []byte
 	streaming bool
 	collect   bool
-	complete  func(io.Reader) ([]byte, error)
 }
 
 func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error) {
