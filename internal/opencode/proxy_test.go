@@ -26,6 +26,8 @@ import (
 
 const openCodeOK = `{"choices":[{"message":{"role":"assistant","content":"winner"},"finish_reason":"stop"}]}`
 
+const maxAttempts = config.DefaultOpenCodeConcurrency
+
 var projectPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 const compatibilityToolInstructionText = "Only call the function tools supplied by the caller"

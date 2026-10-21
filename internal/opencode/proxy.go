@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"sort"
@@ -15,7 +16,6 @@ import (
 )
 
 const (
-	maxAttempts      = 10
 	maxCompatRetries = 2
 	maxErrorBytes    = 1 << 20
 	maxEventBytes    = 1 << 20
@@ -58,6 +58,13 @@ func (p *Proxy) streamIdleTimeout() time.Duration {
 		return p.cfg.StreamIdleTimeout
 	}
 	return 60 * time.Second
+}
+
+func (p *Proxy) concurrency() int {
+	if p.cfg.Concurrency > 0 {
+		return p.cfg.Concurrency
+	}
+	return config.DefaultOpenCodeConcurrency
 }
 
 func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, streaming bool) {
@@ -156,9 +163,10 @@ func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan
 	})
 }
 
-// serve owns the ten-way race and hands the winning transport response to the
+// serve owns the configured race and hands the winning transport response to the
 // protocol-specific writer. The winner remains readable until deliver returns.
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatRequest, identity requestIdentity, deliver func(http.ResponseWriter, *attemptResult)) {
+	maxAttempts := p.concurrency()
 	sources, err := p.sources(maxAttempts)
 	if err != nil || len(sources) != maxAttempts {
 		httpx.WriteError(w, http.StatusBadGateway, "connection_error", "Cannot allocate OpenCode source IPv6 addresses")
@@ -250,7 +258,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		}
 	}
 	if p.logger != nil {
-		p.logger.Errorf("All OpenCode attempts failed: %v", lastErr)
+		p.logger.Errorf("All %d OpenCode attempts failed: %v", maxAttempts, lastErr)
 	}
 	if lastHTTP != nil {
 		if lastHTTP.response.StatusCode == http.StatusTooManyRequests {
@@ -262,5 +270,5 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		_, _ = w.Write(lastHTTP.body)
 		return
 	}
-	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", "All 10 OpenCode attempts failed without a valid response")
+	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", fmt.Sprintf("All %d OpenCode attempts failed without a valid response", maxAttempts))
 }

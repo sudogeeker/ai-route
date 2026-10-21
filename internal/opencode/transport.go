@@ -18,7 +18,7 @@ func (p *Proxy) newTransport(source net.IP) *http.Transport {
 	return &http.Transport{
 		// Direct egress is required: an environment proxy would bypass source binding.
 		// HTTP/2 may replay REFUSED_STREAM/GOAWAY internally. HTTP/1.1 on a
-		// fresh transport keeps the total at ten actual request attempts.
+		// fresh transport keeps actual requests within the configured attempt count.
 		TLSNextProto:        make(map[string]func(string, *tls.Conn) http.RoundTripper),
 		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: 10 * time.Second,

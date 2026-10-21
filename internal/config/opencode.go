@@ -16,6 +16,8 @@ const OpenCodeVersion = "2.0.29"
 // OpenCodeUserAgent is the 2.x CLI fingerprint expected by the inference gate.
 const OpenCodeUserAgent = "opencode/latest/" + OpenCodeVersion + "/cli"
 
+const DefaultOpenCodeConcurrency = 10
+
 var defaultOpenCodeModels = []string{
 	"big-pickle", "beam-free", "mimo-v2.6-flash-free",
 	"nemotron-3.5-super-vl-free", "nemotron-3.5-lightning-free",
@@ -34,6 +36,7 @@ func loadOpenCode() (OpenCode, error) {
 		AuthKey:           strings.TrimSpace(authKey),
 		FreeCompat:        true,
 		Models:            make(map[string]bool),
+		Concurrency:       DefaultOpenCodeConcurrency,
 		WaitTimeout:       120 * time.Second,
 		StreamIdleTimeout: 60 * time.Second,
 		MaxBodyBytes:      64 << 20,
@@ -68,6 +71,16 @@ func loadOpenCode() (OpenCode, error) {
 			return cfg, errors.New("OPENCODE_MODELS must contain bare model IDs")
 		}
 		cfg.Models[model] = true
+	}
+	concurrency := os.Getenv("OPENCODE_CONCURRENCY")
+	if concurrency == "" {
+		concurrency = os.Getenv("opencode_concurrency")
+	}
+	if concurrency != "" {
+		cfg.Concurrency, err = strconv.Atoi(strings.TrimSpace(concurrency))
+		if err != nil || cfg.Concurrency <= 0 {
+			return cfg, errors.New("OPENCODE_CONCURRENCY must be a positive integer")
+		}
 	}
 	if raw := os.Getenv("OPENCODE_WAIT_TIMEOUT"); raw != "" {
 		cfg.WaitTimeout, err = time.ParseDuration(raw)

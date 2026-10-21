@@ -1,5 +1,14 @@
 # OpenCode 请求停滞保护
 
+使用环境变量 `OPENCODE_CONCURRENCY` 设置每个请求的竞速并发数，默认 `10`，必须为正整数。例如 Docker Compose：
+
+```yaml
+environment:
+  OPENCODE_CONCURRENCY: "20"
+```
+
+也接受小写 `opencode_concurrency`；两者都有非空值时，大写优先。修改后重启程序或重新创建容器生效。每次兼容工具重试也使用同样的并发数；选出胜者后取消其他尝试。
+
 程序为以下等待分别设置边界，正常持续输出的回答没有总时长限制：
 
 | 阶段 | 默认值 | 配置 |

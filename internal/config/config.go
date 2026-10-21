@@ -30,6 +30,7 @@ type OpenCode struct {
 	AuthKey           string
 	FreeCompat        bool
 	Models            map[string]bool
+	Concurrency       int
 	WaitTimeout       time.Duration
 	StreamIdleTimeout time.Duration
 	MaxBodyBytes      int64
