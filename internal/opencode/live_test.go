@@ -24,11 +24,24 @@ func TestOpenCodeLiveFreeChat(t *testing.T) {
 	if model == "" {
 		model = "big-pickle"
 	}
-	base, _ := url.Parse("https://opencode.ai/inference/openai/v1")
+	baseURL := os.Getenv("OPENCODE_LIVE_BASE_URL")
+	if baseURL == "" {
+		baseURL = "https://opencode.ai/inference/openai/v1"
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &Proxy{cfg: config.OpenCode{BaseURL: base, FreeCompat: true}}
 	p.transport = func(source net.IP) *http.Transport {
 		transport := p.newTransport(source)
-		transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+		dial := (&net.Dialer{Timeout: 10 * time.Second}).DialContext
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if os.Getenv("OPENCODE_LIVE_FORCE_IPV4") == "1" {
+				network = "tcp4"
+			}
+			return dial(ctx, network, address)
+		}
 		return transport
 	}
 	for _, streaming := range []bool{false, true} {
@@ -41,7 +54,7 @@ func TestOpenCodeLiveFreeChat(t *testing.T) {
 			defer cancel()
 			body, err := json.Marshal(map[string]any{
 				"model": model, "messages": []map[string]string{{"role": "user", "content": "Reply exactly OK. Do not use tools."}},
-				"max_completion_tokens": 256,
+				"max_tokens": 256,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -55,10 +68,15 @@ func TestOpenCodeLiveFreeChat(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := p.attempt(ctx, net.IPv6loopback, request, identity)
+			result := p.attempt(ctx, nil, request, identity)
 			defer result.cleanup()
 			if result.err != nil {
-				t.Fatalf("live anonymous request failed: %v %s", result.err, result.body)
+				retryAfter, placement := "", ""
+				if result.response != nil {
+					retryAfter = result.response.Header.Get("Retry-After")
+					placement = result.response.Header.Get("CF-Placement")
+				}
+				t.Fatalf("live anonymous request failed: %v body=%s retry-after=%q cf-placement=%q", result.err, result.body, retryAfter, placement)
 			}
 			data := result.body
 			if request.streaming {

@@ -2,8 +2,6 @@ package opencode
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -13,14 +11,12 @@ const identifierChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 
 type requestIdentity struct {
 	session string
+	request string
 }
 
-// clientProjectID renders the bare 40-character lowercase hex project value
-// the OpenCode 2.x CLI sends. Upstream checks the shape, not the value.
-func clientProjectID(session string) string {
-	sum := sha256.Sum256([]byte("opencode-project\x00" + session))
-	return hex.EncodeToString(sum[:20])
-}
+// openCodeProjectID is the stateless CLI project fingerprint. The captured
+// anonymous request uses the global project rather than hashing the session.
+const openCodeProjectID = "global"
 
 type identifierGenerator struct {
 	mu        sync.Mutex
@@ -31,8 +27,13 @@ type identifierGenerator struct {
 var identifiers identifierGenerator
 
 func newRequestIdentity() (requestIdentity, error) {
-	session, err := identifiers.next("ses", true, time.Now().UnixMilli())
-	return requestIdentity{session: session}, err
+	now := time.Now().UnixMilli()
+	session, err := identifiers.next("ses", true, now)
+	if err != nil {
+		return requestIdentity{}, err
+	}
+	request, err := identifiers.next("msg", false, now)
+	return requestIdentity{session: session, request: request}, err
 }
 
 // next matches the OpenCode client's six-byte time/counter encoding and random

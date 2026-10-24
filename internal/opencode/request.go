@@ -6,27 +6,40 @@ import (
 	"errors"
 )
 
-// toolsJSON holds the OpenCode 2.x CLI tool definitions. The inference free
-// tier validates every recognised tool against these descriptions and
-// parameter schemas, so stubs or generic schemas are rejected.
+// toolsJSON is the exact tool array emitted by the OpenCode 1.19.4 CLI. The
+// inference free tier validates every recognised tool against these
+// descriptions and parameter schemas, so stubs or generic schemas are rejected.
 //
 //go:embed tools.json
 var toolsJSON []byte
 
 type toolDefinition struct {
+	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	raw         json.RawMessage
 }
 
-var toolNames = []string{"edit", "execute", "glob", "grep", "question", "read", "shell", "skill", "subagent", "webfetch", "websearch", "write"}
+var toolNames = []string{"bash", "edit", "glob", "grep", "read", "skill", "task", "todowrite", "webfetch", "websearch", "write"}
 
 // coreToolNames are the tools the agent-shaped free-tier gate requires.
-var coreToolNames = []string{"shell", "edit", "glob", "grep", "read"}
+var coreToolNames = []string{"bash", "edit", "glob", "grep", "read"}
 
 var toolDefinitions = func() map[string]toolDefinition {
-	var definitions map[string]toolDefinition
-	if err := json.Unmarshal(toolsJSON, &definitions); err != nil {
+	var entries []json.RawMessage
+	if err := json.Unmarshal(toolsJSON, &entries); err != nil {
 		panic(err)
+	}
+	definitions := make(map[string]toolDefinition, len(entries))
+	for _, raw := range entries {
+		var entry struct {
+			Function toolDefinition `json:"function"`
+		}
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			panic(err)
+		}
+		entry.Function.raw = raw
+		definitions[entry.Function.Name] = entry.Function
 	}
 	return definitions
 }()
@@ -36,16 +49,7 @@ func chatTool(name string) json.RawMessage {
 	if !ok {
 		return nil
 	}
-	data, err := json.Marshal(map[string]any{
-		"type": "function",
-		"function": map[string]any{
-			"name": name, "description": definition.Description, "parameters": definition.Parameters,
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return data
+	return definition.raw
 }
 
 var chatTools = func() json.RawMessage {
@@ -89,6 +93,12 @@ func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error
 	if !compatibility {
 		return request, nil
 	}
+	var err error
+	body, err = injectAgentPrompt(body)
+	if err != nil {
+		return request, errors.New("messages must be an array")
+	}
+	request.body = body
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
 		return request, errors.New("A JSON chat request is required")
@@ -117,25 +127,22 @@ func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error
 	}
 	fields["tools"] = tools
 	if len(callerTools) == 0 {
-		// Keep the injected declarations non-callable for text-only requests.
-		fields["tool_choice"] = json.RawMessage(`"none"`)
+		fields["tool_choice"] = json.RawMessage(`"auto"`)
 	}
 	// The free tier only serves agent-shaped streaming requests.
 	fields["stream"] = json.RawMessage(`true`)
-	if !streaming {
-		// Request usage in the final SSE event so ordinary JSON callers keep it.
-		var options map[string]json.RawMessage
-		if raw := fields["stream_options"]; len(raw) != 0 {
-			if json.Unmarshal(raw, &options) != nil {
-				return request, errors.New("stream_options must be an object")
-			}
+	// Request usage in the final SSE event so ordinary JSON callers keep it.
+	var options map[string]json.RawMessage
+	if raw := fields["stream_options"]; len(raw) != 0 {
+		if json.Unmarshal(raw, &options) != nil {
+			return request, errors.New("stream_options must be an object")
 		}
-		if options == nil {
-			options = make(map[string]json.RawMessage)
-		}
-		options["include_usage"] = json.RawMessage(`true`)
-		fields["stream_options"], _ = json.Marshal(options)
 	}
+	if options == nil {
+		options = make(map[string]json.RawMessage)
+	}
+	options["include_usage"] = json.RawMessage(`true`)
+	fields["stream_options"], _ = json.Marshal(options)
 	request.body, err = json.Marshal(fields)
 	request.streaming, request.collect = true, !streaming
 	return request, err
@@ -163,7 +170,7 @@ func stripClientMetadata(body []byte) []byte {
 	return stripped
 }
 
-// ensureAgentTools rewrites recognised caller tools to their genuine 2.x
+// ensureAgentTools rewrites recognised caller tools to their genuine 1.19.4
 // definitions and appends any missing core tools. Caller tools are preserved.
 func ensureAgentTools(tools []json.RawMessage) []json.RawMessage {
 	if len(tools) == 0 {

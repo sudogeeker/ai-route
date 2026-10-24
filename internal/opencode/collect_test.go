@@ -125,7 +125,7 @@ func TestOpenCodeCompatibilityResponses(t *testing.T) {
 				// A canceled losing attempt may not deliver its full body.
 				return
 			}
-			if !request.Stream || len(request.Tools) != 12 || request.ToolChoice != "none" {
+			if !request.Stream || len(request.Tools) != 11 || request.ToolChoice != "auto" {
 				t.Error("upstream request did not use disabled compatibility tools and SSE")
 			}
 			w.Header().Set("Content-Type", "text/event-stream")

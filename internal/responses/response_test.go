@@ -94,7 +94,7 @@ func TestPrepareAddsCompatibilityToolsToToolFreeRequests(t *testing.T) {
 	if err := json.Unmarshal(plan.ChatBody, &chat); err != nil {
 		t.Fatal(err)
 	}
-	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "reserved" || string(chat.ToolChoice) != `"none"` {
+	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "reserved" || string(chat.ToolChoice) != `"auto"` {
 		t.Fatalf("bad tool-free compatibility request: %s", plan.ChatBody)
 	}
 }
@@ -925,13 +925,13 @@ func TestPrepareMapsExtendedResponseFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	var chat struct {
-		MaxCompletionTokens int      `json:"max_completion_tokens"`
-		ReasoningEffort     string   `json:"reasoning_effort"`
-		Verbosity           string   `json:"verbosity"`
-		ServiceTier         string   `json:"service_tier"`
-		SafetyIdentifier    string   `json:"safety_identifier"`
-		Modalities          []string `json:"modalities"`
-		Audio               struct {
+		MaxTokens        int      `json:"max_tokens"`
+		ReasoningEffort  string   `json:"reasoning_effort"`
+		Verbosity        string   `json:"verbosity"`
+		ServiceTier      string   `json:"service_tier"`
+		SafetyIdentifier string   `json:"safety_identifier"`
+		Modalities       []string `json:"modalities"`
+		Audio            struct {
 			Voice  string `json:"voice"`
 			Format string `json:"format"`
 		} `json:"audio"`
@@ -959,7 +959,7 @@ func TestPrepareMapsExtendedResponseFields(t *testing.T) {
 	if err := json.Unmarshal(plan.ChatBody, &chat); err != nil {
 		t.Fatal(err)
 	}
-	if chat.MaxCompletionTokens != 42 || chat.ReasoningEffort != "high" || chat.Verbosity != "medium" {
+	if chat.MaxTokens != 42 || chat.ReasoningEffort != "high" || chat.Verbosity != "medium" {
 		t.Fatalf("core options were not mapped: %s", plan.ChatBody)
 	}
 	if chat.ServiceTier != "flex" || chat.SafetyIdentifier != "safe-user" || len(chat.Modalities) != 2 || chat.Audio.Voice != "alloy" || chat.Audio.Format != "wav" {

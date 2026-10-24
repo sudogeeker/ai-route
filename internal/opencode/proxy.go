@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"aizasy.pages.dev/ai-route/internal/config"
@@ -29,22 +31,34 @@ type Proxy struct {
 	logger          *logging.Logger
 	dns             *dnsCache
 	sources         func(int) ([]net.IP, error)
+	sourceCapacity  func(int) int
+	cooldown        func(net.IP, time.Duration)
 	transport       func(net.IP) *http.Transport
 	firstTokenGrace func() time.Duration
+	proxyIndex      atomic.Uint64
 }
 
 func New(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
 	p := &Proxy{
-		cfg:     cfg,
-		logger:  logger,
-		dns:     &dnsCache{host: cfg.BaseURL.Hostname(), lookup: net.DefaultResolver.LookupIP},
-		sources: sources.Unique,
+		cfg:    cfg,
+		logger: logger,
+		dns:    &dnsCache{host: cfg.BaseURL.Hostname(), lookup: net.DefaultResolver.LookupIP},
+	}
+	if sources != nil {
+		p.sources = sources.Unique
+		p.sourceCapacity = sources.RaceCapacity
+		p.cooldown = sources.Cooldown
 	}
 	p.transport = p.newTransport
 	return p
 }
 
-func (p *Proxy) SupportsModel(model string) bool { return p.cfg.Models[model] }
+func (p *Proxy) SupportsModel(model string) bool {
+	if p.cfg.Models[model] {
+		return true
+	}
+	return p.cfg.AllowImplicitFree && (strings.HasSuffix(model, "-free") || model == "big-pickle")
+}
 
 func (p *Proxy) Models() []string {
 	models := make([]string, 0, len(p.cfg.Models))
@@ -67,6 +81,54 @@ func (p *Proxy) concurrency() int {
 		return p.cfg.Concurrency
 	}
 	return config.DefaultOpenCodeConcurrency
+}
+
+func (p *Proxy) usesIPv6Sources() bool {
+	return len(p.cfg.ProxyURLs) == 0 && p.sources != nil
+}
+
+func (p *Proxy) retryBudget() int {
+	if p.cfg.Retries > 0 {
+		return p.cfg.Retries
+	}
+	return 0
+}
+
+func (p *Proxy) raceCount(bodyBytes int) int {
+	count := p.concurrency()
+	if p.cfg.LargeContextBytes > 0 && int64(bodyBytes) >= p.cfg.LargeContextBytes {
+		limit := p.cfg.LargeContextRace
+		if limit <= 0 {
+			limit = config.DefaultOpenCodeLargeContextRace
+		}
+		if limit < count {
+			count = limit
+		}
+	}
+	if p.usesIPv6Sources() {
+		if p.sourceCapacity == nil {
+			return count
+		}
+		if capacity := p.sourceCapacity(count); capacity > 0 && capacity < count {
+			count = capacity
+		}
+		return count
+	}
+	egresses := len(p.cfg.ProxyURLs)
+	if egresses == 0 {
+		egresses = 1
+	}
+	if egresses < count {
+		count = egresses
+	}
+	return count
+}
+
+func (p *Proxy) canRotate() bool {
+	if p.usesIPv6Sources() {
+		return true
+	}
+	return len(p.cfg.ProxyURLs) > 1
 }
 
 func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, streaming bool) {
@@ -127,12 +189,20 @@ func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request, body []by
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
+	chatBody := plan.ChatBody
+	if p.cfg.FreeCompat {
+		chatBody, err = injectAgentPrompt(chatBody)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid_request_error", "Responses messages must be an array")
+			return
+		}
+	}
 	identity, err := newRequestIdentity()
 	if err != nil {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal_error", "Cannot allocate OpenCode request identifiers")
 		return
 	}
-	p.serveResponsesRound(w, r, plan, identity, plan.ChatBody, 0)
+	p.serveResponsesRound(w, r, plan, identity, chatBody, 0)
 }
 
 func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan *responses.Plan, identity requestIdentity, body []byte, round int) {
@@ -185,11 +255,15 @@ func (p *Proxy) serveResponsesRound(w http.ResponseWriter, r *http.Request, plan
 // serve owns the configured race and hands the winning transport response to the
 // protocol-specific writer. The winner remains readable until deliver returns.
 func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatRequest, identity requestIdentity, deliver func(http.ResponseWriter, *attemptResult)) {
-	maxAttempts := p.concurrency()
-	sources, err := p.sources(maxAttempts)
-	if err != nil || len(sources) != maxAttempts {
-		httpx.WriteError(w, http.StatusBadGateway, "connection_error", "Cannot allocate OpenCode source IPv6 addresses")
-		return
+	maxAttempts := p.raceCount(len(request.body))
+	sources := make([]net.IP, maxAttempts)
+	if p.usesIPv6Sources() {
+		var err error
+		sources, err = p.sources(maxAttempts)
+		if err != nil || len(sources) != maxAttempts {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "upstream_rate_limit", "Cannot allocate non-cooling OpenCode source IPv6 addresses")
+			return
+		}
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -205,7 +279,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		cancels[index] = attemptCancel
 		sources[index] = source
-		usedSources[source.String()] = true
+		if source != nil {
+			usedSources[source.String()] = true
+		}
 		inflight++
 		launched++
 		go func(index int, source net.IP) {
@@ -215,7 +291,10 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 	for index, source := range sources {
 		launch(index, source)
 	}
-	nextSource := func() (net.IP, error) {
+	nextSource := func(avoid net.IP) (net.IP, error) {
+		if !p.usesIPv6Sources() {
+			return nil, nil
+		}
 		for i := 0; i < 128; i++ {
 			fresh, err := p.sources(1)
 			if err != nil {
@@ -224,7 +303,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 			if len(fresh) != 1 {
 				return nil, errors.New("Cannot allocate OpenCode replacement source IPv6 address")
 			}
-			if !usedSources[fresh[0].String()] {
+			if !usedSources[fresh[0].String()] && (avoid == nil || !sameIPv6Subnet64(avoid, fresh[0])) {
 				return fresh[0], nil
 			}
 		}
@@ -255,6 +334,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 	defer timer.Stop()
 	var lastHTTP *attemptResult
 	var lastErr error
+	retries := p.retryBudget()
 	for inflight > 0 {
 		select {
 		case <-r.Context().Done():
@@ -286,16 +366,37 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 					lastHTTP = &copy
 				}
 				result.cleanup()
+				source := sources[outcome.index]
 				cancels[outcome.index]()
 				cancels[outcome.index] = nil
-				if errors.Is(result.err, errFirstTokenTimeout) && ctx.Err() == nil {
-					source, err := nextSource()
+				firstTokenTimeout := errors.Is(result.err, errFirstTokenTimeout)
+				sourceDependent := result.response != nil && (result.response.StatusCode == http.StatusForbidden || result.response.StatusCode == http.StatusTooManyRequests)
+				canRetry := (firstTokenTimeout || retryableResult(&result)) && (firstTokenTimeout || retries > 0)
+				if sourceDependent && !p.canRotate() {
+					canRetry = false
+				}
+				if canRetry {
+					if p.cooldown != nil && source != nil && sourceDependent {
+						cooldown := p.cfg.Cooldown
+						if result.retryAfter > cooldown {
+							cooldown = result.retryAfter
+						}
+						p.cooldown(source, cooldown)
+					}
+					var avoid net.IP
+					if sourceDependent {
+						avoid = source
+					}
+					fresh, err := nextSource(avoid)
 					if err != nil {
 						lastErr = err
 					} else {
+						if !firstTokenTimeout {
+							retries--
+						}
 						// Refill only this expired slot. Other attempts retain
 						// their own grace periods and can still win.
-						launch(outcome.index, source)
+						launch(outcome.index, fresh)
 					}
 				}
 				continue
@@ -327,4 +428,33 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 		return
 	}
 	httpx.WriteError(w, http.StatusBadGateway, "upstream_error", fmt.Sprintf("All %d OpenCode attempts failed without a valid response", launched))
+}
+
+func retryableResult(result *attemptResult) bool {
+	if result == nil {
+		return false
+	}
+	if errors.Is(result.err, context.Canceled) || errors.Is(result.err, context.DeadlineExceeded) {
+		return false
+	}
+	if result.response == nil {
+		return true
+	}
+	status := result.response.StatusCode
+	switch status {
+	case http.StatusForbidden, http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	}
+	if status >= http.StatusInternalServerError {
+		return true
+	}
+	return status >= 200 && status < 300 && result.err != nil
+}
+
+func sameIPv6Subnet64(a, b net.IP) bool {
+	left, right := a.To16(), b.To16()
+	if left == nil || right == nil || a.To4() != nil || b.To4() != nil {
+		return false
+	}
+	return string(left[:8]) == string(right[:8])
 }

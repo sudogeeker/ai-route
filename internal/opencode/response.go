@@ -10,24 +10,28 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"aizasy.pages.dev/ai-route/internal/config"
 )
 
 type attemptResult struct {
-	response *http.Response
-	body     []byte
-	stream   io.Reader
-	err      error
-	cleanup  func()
+	response   *http.Response
+	body       []byte
+	stream     io.Reader
+	err        error
+	retryAfter time.Duration
+	cleanup    func()
 }
 
 func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest, identity requestIdentity) (result attemptResult) {
 	ctx, cancelCause := context.WithCancelCause(ctx)
 	cancel := func() { cancelCause(context.Canceled) }
 	grace := p.firstTokenTimeout()
-	deadline := newFirstTokenDeadline(grace, cancelCause)
+	deadline := newFirstTokenDeadline(cancelCause)
 	defer func() {
 		if deadline.stop() {
 			result.err = fmt.Errorf("%w after %s", errFirstTokenTimeout, grace)
@@ -37,19 +41,19 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	result.cleanup = func() { cancel(); transport.CloseIdleConnections() }
 	target := *p.cfg.BaseURL
 	target.Path += "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(request.body))
+	uploaded := make(chan struct{})
+	body := &uploadTrackingBody{reader: bytes.NewReader(request.body), remaining: int64(len(request.body)), uploaded: uploaded}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), body)
 	if err != nil {
 		result.err = err
 		return result
 	}
+	req.ContentLength = int64(len(request.body))
 	// Do not copy caller credentials, cookies, Google keys or query parameters.
 	req.Header.Set("Content-Type", "application/json")
 
 	req.Header.Set("User-Agent", config.OpenCodeUserAgent)
-
-	if request.streaming {
-		req.Header.Set("Accept", "text/event-stream")
-	}
+	req.Header.Set("Accept", "*/*")
 
 	// Match the anonymous credential used by the OpenCode provider loader.
 	if p.cfg.APIKey != "" {
@@ -58,13 +62,19 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 		req.Header.Set("Authorization", "Bearer public")
 	}
 
-	// Every attempt carries the same OpenCode 2.x session fingerprint.
+	// Every attempt carries the same OpenCode 1.19.4 request fingerprint.
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-session-id", identity.session)
 	req.Header.Set("x-opencode-session", identity.session)
-	req.Header.Set("x-session-affinity", identity.session)
-	req.Header.Set("X-Session-Id", identity.session)
-	req.Header.Set("x-opencode-project", clientProjectID(identity.session))
+	req.Header.Set("x-opencode-request", identity.request)
+	req.Header.Set("x-opencode-project", openCodeProjectID)
+	go func() {
+		select {
+		case <-uploaded:
+			deadline.start(grace)
+		case <-ctx.Done():
+		}
+	}()
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		result.err = err
@@ -75,6 +85,7 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	result.cleanup = func() { cancel(); resp.Body.Close(); transport.CloseIdleConnections() }
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
+		result.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
 		return result
 	}
@@ -102,6 +113,41 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 		result.err = errors.New("invalid OpenCode chat response")
 	}
 	return result
+}
+
+type uploadTrackingBody struct {
+	reader    io.Reader
+	remaining int64
+	uploaded  chan struct{}
+	once      sync.Once
+}
+
+func (b *uploadTrackingBody) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	b.remaining -= int64(n)
+	if b.remaining <= 0 || err == io.EOF {
+		b.once.Do(func() { close(b.uploaded) })
+	}
+	return n, err
+}
+
+func (b *uploadTrackingBody) Close() error { return nil }
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 // A 200 containing an error, truncated JSON, or an empty choices list is not a winner.

@@ -25,7 +25,13 @@ func Run(ctx context.Context, cfg config.Config) error {
 
 	sources, err := ipv6.NewSourcePool(cfg.ManualCIDRs)
 	if err != nil {
-		return fmt.Errorf("initialize source IPv6 ranges: %w", err)
+		if len(cfg.ManualCIDRs) != 0 {
+			return fmt.Errorf("initialize source IPv6 ranges: %w", err)
+		}
+		// OpenCode can use a proxy pool or normal IPv4 connectivity. Gemini
+		// remains IPv6-only and will fail until a usable source is available.
+		logger.Warnf("No local IPv6 source range: %v", err)
+		sources = nil
 	}
 	google := gemini.New(cfg.Gemini, sources, logger)
 	defer google.Close()

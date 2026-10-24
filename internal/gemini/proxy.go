@@ -24,7 +24,11 @@ type Proxy struct {
 }
 
 func New(cfg config.Gemini, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
-	p := &Proxy{cfg: cfg, logger: logger, source: sources.Random}
+	source := func() net.IP { return nil }
+	if sources != nil {
+		source = sources.Random
+	}
+	p := &Proxy{cfg: cfg, logger: logger, source: source}
 	p.transport = p.newTransport()
 	p.handler = newReverseProxy(&url.URL{Scheme: "https", Host: cfg.TargetHost}, p.transport, logger)
 	return p

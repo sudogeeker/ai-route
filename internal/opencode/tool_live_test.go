@@ -38,7 +38,7 @@ func TestOpenCodeLiveToolRoundTrip(t *testing.T) {
 	}
 	custom := json.RawMessage(`{"type":"function","function":{"name":"route_echo","description":"Return the supplied text.","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}}}`)
 	messages := []map[string]any{{"role": "user", "content": "Call route_echo with text hello. After receiving its result, reply with the result exactly."}}
-	body := map[string]any{"model": model, "messages": messages, "tools": []json.RawMessage{custom}, "tool_choice": map[string]any{"type": "function", "function": map[string]string{"name": "route_echo"}}, "stream": true, "max_completion_tokens": 512}
+	body := map[string]any{"model": model, "messages": messages, "tools": []json.RawMessage{custom}, "tool_choice": map[string]any{"type": "function", "function": map[string]string{"name": "route_echo"}}, "stream": true, "max_tokens": 512}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	identity, err := newRequestIdentity()

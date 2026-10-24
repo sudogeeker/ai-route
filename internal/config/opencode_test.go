@@ -7,24 +7,29 @@ import (
 )
 
 func TestOpenCodeConfig(t *testing.T) {
-	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_MAX_BODY_BYTES", "OPENCODE_CONCURRENCY", "opencode_concurrency"} {
+	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_FIRST_TOKEN_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_COOLDOWN", "OPENCODE_RETRIES", "OPENCODE_MAX_BODY_BYTES", "OPENCODE_CONCURRENCY", "opencode_concurrency", "OPENCODE_LARGE_CONTEXT_BYTES", "OPENCODE_LARGE_CONTEXT_CONCURRENCY", "OPENCODE_PROXY_URL", "OPENCODE_PROXY_URLS"} {
 		t.Setenv(key, "")
 	}
 	os.Unsetenv("OPENCODE_MODELS")
 	defaults, err := loadOpenCode()
-	if err != nil || len(defaults.Models) != 9 || defaults.Models["jev-1.13-free"] || !defaults.FreeCompat {
+	if err != nil || len(defaults.Models) != 46 || defaults.Models["jev-1.13-free"] || !defaults.Models["flint-40b-free"] || !defaults.FreeCompat || !defaults.AllowImplicitFree || defaults.LargeContextBytes != DefaultOpenCodeLargeContextBytes || defaults.LargeContextRace != DefaultOpenCodeLargeContextRace {
 		t.Fatalf("bad default model list: %+v %v", defaults.Models, err)
 	}
 	// An explicitly empty allowlist is invalid; use a small operator-supplied list here.
 	t.Setenv("OPENCODE_MODELS", "big-pickle,mimo-v2.6-flash-free")
 	cfg, err := loadOpenCode()
-	if err != nil || len(cfg.Models) != 2 || cfg.Concurrency != DefaultOpenCodeConcurrency || cfg.WaitTimeout != 120*time.Second || cfg.StreamIdleTimeout != 60*time.Second || cfg.MaxBodyBytes != 64<<20 {
+	if err != nil || len(cfg.Models) != 2 || cfg.AllowImplicitFree || cfg.Concurrency != DefaultOpenCodeConcurrency || cfg.LargeContextBytes != DefaultOpenCodeLargeContextBytes || cfg.LargeContextRace != DefaultOpenCodeLargeContextRace || cfg.Retries != DefaultOpenCodeRetries || cfg.WaitTimeout != 180*time.Second || cfg.FirstTokenTimeout != DefaultOpenCodeFirstTokenGrace || cfg.StreamIdleTimeout != 60*time.Second || cfg.Cooldown != DefaultOpenCodeCooldown || cfg.MaxBodyBytes != 64<<20 {
 		t.Fatalf("bad config: %+v %v", cfg, err)
 	}
 	for _, setting := range []struct{ key, value string }{
 		{"OPENCODE_BASE_URL", "http://example.com"}, {"OPENCODE_BASE_URL", "https://key@example.com"}, {"OPENCODE_BASE_URL", "https://example.com?key=secret"},
 		{"OPENCODE_WAIT_TIMEOUT", "0s"}, {"OPENCODE_MAX_BODY_BYTES", "-1"}, {"OPENCODE_MODELS", ""}, {"OPENCODE_MODELS", "opencode/big-pickle"},
 		{"OPENCODE_STREAM_IDLE_TIMEOUT", "0s"}, {"OPENCODE_STREAM_IDLE_TIMEOUT", "invalid"},
+		{"OPENCODE_FIRST_TOKEN_TIMEOUT", "0s"}, {"OPENCODE_FIRST_TOKEN_TIMEOUT", "invalid"},
+		{"OPENCODE_COOLDOWN", "-1s"}, {"OPENCODE_COOLDOWN", "invalid"},
+		{"OPENCODE_RETRIES", "-1"}, {"OPENCODE_RETRIES", "invalid"},
+		{"OPENCODE_LARGE_CONTEXT_BYTES", "-1"}, {"OPENCODE_LARGE_CONTEXT_BYTES", "invalid"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "0"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "invalid"},
+		{"OPENCODE_PROXY_URLS", "ftp://proxy.example"}, {"OPENCODE_PROXY_URLS", "http://proxy.example/path"}, {"OPENCODE_PROXY_URLS", "http://proxy.example?"},
 		{"OPENCODE_FREE_COMPAT", "invalid"},
 	} {
 		t.Run(setting.key+setting.value, func(t *testing.T) {
@@ -41,6 +46,14 @@ func TestOpenCodeConfig(t *testing.T) {
 	t.Setenv("OPENCODE_FREE_COMPAT", "false")
 	if cfg, err := loadOpenCode(); err != nil || cfg.FreeCompat {
 		t.Fatalf("cannot disable compatibility: %+v %v", cfg, err)
+	}
+}
+
+func TestOpenCodeProxyURLs(t *testing.T) {
+	t.Setenv("OPENCODE_PROXY_URLS", "http://user:pass@proxy.example:8080, socks5h://127.0.0.1:1080")
+	cfg, err := loadOpenCode()
+	if err != nil || len(cfg.ProxyURLs) != 2 || cfg.ProxyURLs[0].Host != "proxy.example:8080" || cfg.ProxyURLs[1].Scheme != "socks5h" {
+		t.Fatalf("proxy URLs were not parsed: %+v %v", cfg.ProxyURLs, err)
 	}
 }
 

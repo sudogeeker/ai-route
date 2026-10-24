@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"aizasy.pages.dev/ai-route/internal/config"
 )
 
 const firstTokenStream = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"winner\"}}]}\n\n"
@@ -19,16 +22,12 @@ const finishedTokenStream = "data: {\"choices\":[{\"index\":0,\"delta\":{},\"fin
 
 func TestFirstTokenGraceRange(t *testing.T) {
 	p := &Proxy{}
-	seen := make(map[time.Duration]bool)
-	for i := 0; i < 100; i++ {
-		grace := p.firstTokenTimeout()
-		if grace < 10*time.Second || grace > 30*time.Second {
-			t.Fatalf("grace outside 10-30s: %s", grace)
-		}
-		seen[grace] = true
+	if grace := p.firstTokenTimeout(); grace != config.DefaultOpenCodeFirstTokenGrace {
+		t.Fatalf("unexpected default grace: %s", grace)
 	}
-	if len(seen) < 2 {
-		t.Fatal("all pool slots received the same grace")
+	p.cfg.FirstTokenTimeout = 3 * time.Minute
+	if grace := p.firstTokenTimeout(); grace != 3*time.Minute {
+		t.Fatalf("configured grace ignored: %s", grace)
 	}
 }
 
@@ -272,5 +271,51 @@ func TestFirstTokenReplaysStopOnBudgetOrCallerCancellation(t *testing.T) {
 				waitOpenCode(t, cleaned)
 			}
 		})
+	}
+}
+
+func TestFirstTokenGraceStartsAfterUpload(t *testing.T) {
+	p := testOpenCodeProxy(t, "http://opencode.test")
+	p.transport = func(net.IP) *http.Transport {
+		return &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+			client, server := net.Pipe()
+			go func() {
+				defer server.Close()
+				request, err := http.ReadRequest(bufio.NewReader(server))
+				if err != nil {
+					return
+				}
+				defer request.Body.Close()
+				buffer := make([]byte, 8<<10)
+				for {
+					n, err := request.Body.Read(buffer)
+					if n > 0 {
+						time.Sleep(4 * time.Millisecond)
+					}
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						return
+					}
+				}
+				io.WriteString(server, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"+firstTokenStream+finishedTokenStream)
+			}()
+			return client, nil
+		}}
+	}
+	p.cfg.Concurrency = 1
+	p.cfg.WaitTimeout = 4 * time.Second
+	p.firstTokenGrace = func() time.Duration { return 80 * time.Millisecond }
+	body := fmt.Sprintf(`{"model":"big-pickle","stream":true,"messages":[{"role":"user","content":%q}]}`, strings.Repeat("x", 512<<10))
+	recorder := httptest.NewRecorder()
+	started := time.Now()
+	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(body))
+	elapsed := time.Since(started)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "winner") {
+		t.Fatalf("slow upload lost its first-token grace: status=%d elapsed=%s", recorder.Code, elapsed)
+	}
+	if elapsed < 200*time.Millisecond {
+		t.Fatalf("test did not exercise a slow upload: %s", elapsed)
 	}
 }

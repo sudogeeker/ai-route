@@ -30,10 +30,17 @@ type OpenCode struct {
 	AuthKey           string
 	FreeCompat        bool
 	Models            map[string]bool
+	AllowImplicitFree bool
 	Concurrency       int
+	LargeContextBytes int64
+	LargeContextRace  int
+	Retries           int
 	WaitTimeout       time.Duration
+	FirstTokenTimeout time.Duration
 	StreamIdleTimeout time.Duration
+	Cooldown          time.Duration
 	MaxBodyBytes      int64
+	ProxyURLs         []*url.URL
 }
 
 // Load preserves environment defaults followed by explicit command-line overrides.

@@ -13,7 +13,7 @@ import (
 
 type object = map[string]any
 
-const compatibilityToolInstruction = "Only call the function tools supplied by the caller. Caller tools have names beginning with route_. The tools named edit, execute, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, and write are upstream compatibility declarations and must not be called."
+const compatibilityToolInstruction = "Only call the function tools supplied by the caller. Caller tools have names beginning with route_. The tools named bash, edit, glob, grep, read, skill, task, todowrite, webfetch, websearch, and write are upstream compatibility declarations and must not be called."
 
 // Plan is immutable after Prepare and can be shared by competing attempts.
 type Plan struct {
@@ -112,6 +112,9 @@ func Prepare(body []byte, padding json.RawMessage) (*Plan, error) {
 		}
 	}
 	callerTools := p.tools.definitionsFor(p.allowed)
+	if len(callerTools) == 0 && len(reserved) != 0 && !p.compact {
+		choice = "auto"
+	}
 	if len(callerTools) != 0 && len(reserved) != 0 {
 		messages = append([]object{{"role": "system", "content": compatibilityToolInstruction}}, messages...)
 	}
@@ -186,11 +189,11 @@ func applyChatOptions(chat map[string]json.RawMessage, fields map[string]json.Ra
 	if raw := fields["max_output_tokens"]; present(raw) {
 		var limit int64
 		if json.Unmarshal(raw, &limit) == nil && limit > 0 {
-			chat["max_completion_tokens"] = raw
+			chat["max_tokens"] = raw
 		}
 	}
 	if raw := fields["max_completion_tokens"]; present(raw) {
-		chat["max_completion_tokens"] = raw
+		chat["max_tokens"] = raw
 	}
 	if raw := fields["reasoning_effort"]; present(raw) {
 		chat["reasoning_effort"] = raw
