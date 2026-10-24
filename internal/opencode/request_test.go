@@ -65,7 +65,7 @@ func hasAgentPrompt(raw json.RawMessage) bool {
 	if json.Unmarshal(prompt.Content, &text) != nil {
 		return false
 	}
-	return prompt.Role == "system" && bytes.Contains([]byte(text), []byte("You are opencode, an interactive CLI tool")) && bytes.Contains([]byte(text), []byte("<env>"))
+	return prompt.Role == "system" && bytes.Contains([]byte(text), []byte("<env>")) && bytes.Contains([]byte(text), []byte("<available_skills>"))
 }
 
 func TestPrepareChatCompatibility(t *testing.T) {
@@ -158,7 +158,7 @@ func TestPrepareChatPassThrough(t *testing.T) {
 	}
 }
 
-func TestPrepareChatInjectsOfficialPrompt(t *testing.T) {
+func TestPrepareChatInjectsEnvironmentAndInstructions(t *testing.T) {
 	prepared, err := prepareChat([]byte(`{"model":"big-pickle","messages":[{"role":"system","content":"client instructions"},{"role":"user","content":"hi"}]}`), true, true)
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestPrepareChatInjectsOfficialPrompt(t *testing.T) {
 	}
 	messages := decodedMessages(t, fields["messages"])
 	if len(messages) != 2 || !hasAgentPrompt(fields["messages"]) {
-		t.Fatalf("official prompt was not merged: %s", messages)
+		t.Fatalf("agent prompt was not merged: %s", messages)
 	}
 	var system struct {
 		Content string `json:"content"`
@@ -258,8 +258,11 @@ func TestPreparedChatMatchesCaptured1194Contract(t *testing.T) {
 	if json.Unmarshal(fields["messages"], &messages) != nil || len(messages) != 2 || messages[0].Role != "system" || messages[1].Role != "user" {
 		t.Fatalf("wrong captured message shape: %s", fields["messages"])
 	}
-	if !strings.HasPrefix(messages[0].Content, agentSystemPrompt+"\nYou are powered by the model named big-pickle. The exact model ID is opencode/big-pickle\n") || !strings.Contains(messages[0].Content, agentSkills) {
-		t.Fatal("system prompt is not the 1.19.4 default/environment/skills assembly")
+	if !strings.HasPrefix(messages[0].Content, "You are powered by the model named big-pickle. The exact model ID is opencode/big-pickle\n") || !strings.Contains(messages[0].Content, agentSkills) {
+		t.Fatal("system prompt is not the environment/skills assembly")
+	}
+	if strings.Contains(messages[0].Content, "You are opencode, an interactive CLI tool") {
+		t.Fatal("the removed default CLI prompt was injected again")
 	}
 	if messages[1].Content != "Reply exactly OK. Do not use tools." {
 		t.Fatalf("user message changed: %q", messages[1].Content)

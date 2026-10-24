@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,13 +11,6 @@ import (
 
 	"aizasy.pages.dev/ai-route/internal/config"
 )
-
-// agentSystemPrompt is the default prompt shipped by the OpenCode 1.19.4 CLI.
-// The free inference gate rejects otherwise valid anonymous requests that omit
-// it or send the 2.x prompt instead.
-//
-//go:embed system_prompt.txt
-var agentSystemPrompt string
 
 const agentSkills = `Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
@@ -67,7 +59,7 @@ func agentEnvironment(model string) string {
 }
 
 func agentSystemContent(model, instructions string) string {
-	parts := []string{agentSystemPrompt, agentEnvironment(model), agentSkills}
+	parts := []string{agentEnvironment(model), agentSkills}
 	if instructions = strings.TrimSpace(instructions); instructions != "" {
 		parts = append(parts, instructions)
 	}

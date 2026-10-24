@@ -72,7 +72,7 @@ WARP_LIVE_TEST=1 go test ./internal/warp -run TestWARPLiveRegistration -count=1 
 
 未设置 `OPENCODE_MODELS` 时，除了内置免费模型列表，还接受任意以 `-free` 结尾的模型和 `big-pickle`。显式设置后只允许列表中的模型，避免把未知模型转发到付费上游。
 
-匿名请求按 OpenCode CLI 契约构造：`opencode/1.19.4` User-Agent、每请求 `ses_` / `msg_` 身份、`x-opencode-project: global`、单一 system message（官方 default prompt + 环境 + skills + 调用方 system/developer 指令）、11 个官方工具定义以及 `max_tokens: 32000`（调用方指定时沿用其值）。这套契约与 2.x 的 header、工具名和 system prompt 不同，不能混用。
+匿名请求按 OpenCode CLI 契约构造：`opencode/1.19.4` User-Agent、每请求 `ses_` / `msg_` 身份、`x-opencode-project: global`、单一 system message（环境 + skills + 调用方 system/developer 指令）、11 个官方工具定义以及 `max_tokens: 32000`（调用方指定时沿用其值）。这套契约与 2.x 的 header、工具名和 system prompt 不同，不能混用。
 
 一旦任何席位返回有效首 token，就取消其余尝试并停止首 token 计时和竞速总计时；后续连续失活仍由 `OPENCODE_STREAM_IDLE_TIMEOUT` 保护。JSON Chat 客户端也先按首 token 选胜者，再只收集胜者的完整回答。Chat SSE 收到 `[DONE]` 后立即释放上游，不再等待对方关闭 TCP 连接。
 
