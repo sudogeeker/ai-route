@@ -29,6 +29,57 @@ const maxAttempts = config.DefaultOpenCodeConcurrency
 
 const compatibilityToolInstructionText = "Only call the function tools supplied by the caller"
 
+type fakeWARPPool struct {
+	mu         sync.Mutex
+	acquires   int
+	releases   int
+	statuses   []int
+	failures   []string
+	dialErrors map[int]error
+}
+
+type fakeWARPEgress struct {
+	pool *fakeWARPPool
+	id   int
+	err  error
+}
+
+func (p *fakeWARPPool) Acquire(context.Context) (warpEgress, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.acquires++
+	return &fakeWARPEgress{pool: p, id: p.acquires, err: p.dialErrors[p.acquires]}, nil
+}
+
+func (p *fakeWARPPool) Report(_ warpEgress, status int, _ []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.statuses = append(p.statuses, status)
+}
+
+func (p *fakeWARPPool) Fail(_ warpEgress, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failures = append(p.failures, reason)
+}
+
+func (e *fakeWARPEgress) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
+	if e.err != nil {
+		return nil, e.err
+	}
+	return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", address)
+}
+
+func (e *fakeWARPEgress) Release() {
+	e.pool.mu.Lock()
+	e.pool.releases++
+	e.pool.mu.Unlock()
+}
+
+func (e *fakeWARPEgress) EgressKey() string { return fmt.Sprintf("2a09:bac1:%x::/64", e.id) }
+
+func (e *fakeWARPEgress) DialNetwork() string { return "tcp" }
+
 func TestOpenCodeRequestIdentity(t *testing.T) {
 	var lock sync.Mutex
 	var requests []http.Header
@@ -103,6 +154,7 @@ func testOpenCodeProxy(t *testing.T, upstreamURL string) *Proxy {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.Proxy = nil
 		transport.DisableKeepAlives = true
+		transport.DialTLSContext = nil
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // Local test certificate only.
 		transport.DialContext = (&net.Dialer{Timeout: time.Second}).DialContext
 		return transport
@@ -220,7 +272,7 @@ func TestOpenCodeFailuresAllAttempted(t *testing.T) {
 	for _, status := range []int{301, 401, 403, 404, 429, 500, 502, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			var attempts atomic.Int32
-			body := `{"error":{"type":"FreeTierError","message":"original refusal"}}`
+			body := `{"error":{"type":"ProviderError","message":"original refusal"}}`
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "Bearer public" {
 					t.Error("keyless request did not use the anonymous credential")
@@ -261,7 +313,7 @@ func TestOpenCodeForbiddenAndRateLimitRotateRetry(t *testing.T) {
 				io.Copy(io.Discard, r.Body)
 				if attempts.Add(1) <= 6 {
 					w.WriteHeader(status)
-					io.WriteString(w, `{"error":{"type":"FreeUsageLimitError"}}`)
+					io.WriteString(w, `{"error":{"type":"RateLimitError"}}`)
 					return
 				}
 				io.WriteString(w, openCodeOK)
@@ -713,7 +765,7 @@ func TestOpenCodeRateLimitDoesNotReplaySameSubnet(t *testing.T) {
 		attempts.Add(1)
 		w.Header().Set("Retry-After", "30")
 		w.WriteHeader(http.StatusTooManyRequests)
-		io.WriteString(w, `{"error":{"type":"FreeUsageLimitError"}}`)
+		io.WriteString(w, `{"error":{"type":"RateLimitError"}}`)
 	}))
 	defer server.Close()
 	p := testOpenCodeProxy(t, server.URL)
@@ -730,6 +782,154 @@ func TestOpenCodeRateLimitDoesNotReplaySameSubnet(t *testing.T) {
 	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
 	if attempts.Load() != 1 {
 		t.Fatalf("same /64 was replayed: attempts=%d", attempts.Load())
+	}
+}
+
+func TestOpenCodeWARPRotatesOnNetworkForbidden(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			io.WriteString(w, `{"error":{"message":"network anomaly"}}`)
+			return
+		}
+		io.WriteString(w, openCodeOK)
+	}))
+	defer server.Close()
+	p := testOpenCodeProxy(t, server.URL)
+	p.cfg.WARP = true
+	p.cfg.Concurrency = 10
+	p.cfg.Retries = 1
+	pool := &fakeWARPPool{}
+	p.warpPool = pool
+	p.warpTransport = func(egress warpEgress) *http.Transport {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DisableKeepAlives = true
+		transport.DialTLSContext = nil
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+			return egress.DialContext(ctx, "tcp", address)
+		}
+		return transport
+	}
+	p.sources = func(int) ([]net.IP, error) {
+		t.Error("WARP mode allocated a source IPv6 address")
+		return nil, errors.New("unexpected source allocation")
+	}
+	recorder := httptest.NewRecorder()
+	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != openCodeOK || attempts.Load() != 2 {
+		t.Fatalf("WARP retry failed: status=%d attempts=%d body=%s", recorder.Code, attempts.Load(), recorder.Body)
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.acquires != 2 || pool.releases != 2 || len(pool.statuses) != 2 || pool.statuses[0] != http.StatusForbidden || pool.statuses[1] != http.StatusOK {
+		t.Fatalf("WARP lifecycle mismatch: acquires=%d releases=%d statuses=%v", pool.acquires, pool.releases, pool.statuses)
+	}
+}
+
+func TestOpenCodeWARPRotatesOnTransportFailure(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		attempts.Add(1)
+		io.WriteString(w, openCodeOK)
+	}))
+	defer server.Close()
+	p := testOpenCodeProxy(t, server.URL)
+	p.cfg.WARP = true
+	p.cfg.Concurrency = 10
+	p.cfg.Retries = 1
+	pool := &fakeWARPPool{dialErrors: map[int]error{1: errors.New("wireguard handshake failed")}}
+	p.warpPool = pool
+	p.warpTransport = func(egress warpEgress) *http.Transport {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DisableKeepAlives = true
+		transport.DialTLSContext = nil
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+			return egress.DialContext(ctx, "tcp", address)
+		}
+		return transport
+	}
+	recorder := httptest.NewRecorder()
+	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != openCodeOK || attempts.Load() != 1 {
+		t.Fatalf("WARP transport retry failed: status=%d attempts=%d body=%s", recorder.Code, attempts.Load(), recorder.Body)
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.acquires != 2 || len(pool.failures) != 1 || pool.failures[0] != "transport error" {
+		t.Fatalf("transport failure was not reported: acquires=%d failures=%v", pool.acquires, pool.failures)
+	}
+}
+
+func TestOpenCodeFreeUsageLimitKeepsRotating(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		attempts.Add(1)
+		w.Header().Set("Retry-After", "25000")
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, `{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached"}}`)
+	}))
+	defer server.Close()
+	p := testOpenCodeProxy(t, server.URL)
+	p.cfg.WARP = true
+	p.cfg.Concurrency = 10
+	p.cfg.Retries = 10
+	pool := &fakeWARPPool{}
+	p.warpPool = pool
+	p.warpTransport = func(egress warpEgress) *http.Transport {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DisableKeepAlives = true
+		transport.DialTLSContext = nil
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		transport.DialContext = func(ctx context.Context, _, address string) (net.Conn, error) {
+			return egress.DialContext(ctx, "tcp", address)
+		}
+		return transport
+	}
+	recorder := httptest.NewRecorder()
+	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "upstream returned HTTP 429") {
+		t.Fatalf("free usage limit response: status=%d body=%s", recorder.Code, recorder.Body)
+	}
+	if attempts.Load() != 11 {
+		t.Fatalf("free usage limit attempts=%d, want initial + 10 retries", attempts.Load())
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	if pool.acquires != 11 || len(pool.statuses) != 11 || len(pool.failures) != 0 {
+		t.Fatalf("free usage limit did not reach rotation state: acquires=%d statuses=%v failures=%v", pool.acquires, pool.statuses, pool.failures)
+	}
+	for _, status := range pool.statuses {
+		if status != http.StatusTooManyRequests {
+			t.Fatalf("unexpected status reported to WARP pool: %v", pool.statuses)
+		}
+	}
+}
+
+func TestOpenCodeFreeTierFingerprintDoesNotRetry(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		attempts.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}}`)
+	}))
+	defer server.Close()
+	p := testOpenCodeProxy(t, server.URL)
+	p.cfg.Concurrency = 1
+	p.cfg.Retries = 10
+	recorder := httptest.NewRecorder()
+	testOpenCodeHandler(p).ServeHTTP(recorder, openCodeTestRequest(`{"model":"big-pickle"}`))
+	if attempts.Load() != 1 || recorder.Code != http.StatusForbidden {
+		t.Fatalf("terminal fingerprint rejection: attempts=%d status=%d", attempts.Load(), recorder.Code)
 	}
 }
 
@@ -774,5 +974,10 @@ func TestOpenCodeRaceCountFollowsAvailableEgresses(t *testing.T) {
 	p.cfg.LargeContextRace = 1
 	if got := p.raceCount(2); got != 1 {
 		t.Fatalf("large-context race cap ignored: got %d", got)
+	}
+	p.cfg.WARP = true
+	p.warpPool = &fakeWARPPool{}
+	if got := p.raceCount(1); got != 1 {
+		t.Fatalf("WARP race=%d, want 1", got)
 	}
 }

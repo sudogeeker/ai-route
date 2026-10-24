@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strconv"
@@ -25,6 +26,9 @@ const (
 	DefaultOpenCodeFirstTokenGrace   = 60 * time.Second
 	DefaultOpenCodeCooldown          = 10 * time.Minute
 	DefaultOpenCodeMaxTokens         = 32000
+	DefaultOpenCodeWARPPoolSize      = 2
+	MaxOpenCodeWARPPoolSize          = 16
+	DefaultOpenCodeWARPStack         = "ipv4"
 )
 
 var defaultOpenCodeModels = []string{
@@ -66,6 +70,8 @@ func loadOpenCode() (OpenCode, error) {
 		StreamIdleTimeout: 60 * time.Second,
 		Cooldown:          DefaultOpenCodeCooldown,
 		MaxBodyBytes:      64 << 20,
+		WARPPoolSize:      DefaultOpenCodeWARPPoolSize,
+		WARPStack:         DefaultOpenCodeWARPStack,
 	}
 	base := os.Getenv("OPENCODE_BASE_URL")
 	if base == "" {
@@ -157,6 +163,24 @@ func loadOpenCode() (OpenCode, error) {
 			return cfg, errors.New("OPENCODE_MAX_BODY_BYTES must be a positive integer")
 		}
 	}
+	if raw := os.Getenv("OPENCODE_WARP"); raw != "" {
+		cfg.WARP, err = strconv.ParseBool(strings.TrimSpace(raw))
+		if err != nil {
+			return cfg, errors.New("OPENCODE_WARP must be a boolean")
+		}
+	}
+	if raw := os.Getenv("OPENCODE_WARP_POOL_SIZE"); raw != "" {
+		cfg.WARPPoolSize, err = strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || cfg.WARPPoolSize <= 0 || cfg.WARPPoolSize > MaxOpenCodeWARPPoolSize {
+			return cfg, fmt.Errorf("OPENCODE_WARP_POOL_SIZE must be an integer between 1 and %d", MaxOpenCodeWARPPoolSize)
+		}
+	}
+	if raw := os.Getenv("OPENCODE_WARP_STACK"); raw != "" {
+		cfg.WARPStack, err = normalizeWARPStack(raw)
+		if err != nil {
+			return cfg, err
+		}
+	}
 	proxy := os.Getenv("OPENCODE_PROXY_URLS")
 	if proxy == "" {
 		proxy = os.Getenv("OPENCODE_PROXY_URL")
@@ -168,6 +192,19 @@ func loadOpenCode() (OpenCode, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func normalizeWARPStack(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "ipv6", "v6":
+		return "ipv6", nil
+	case "ipv4", "v4":
+		return "ipv4", nil
+	case "dual", "both":
+		return "dual", nil
+	default:
+		return "", errors.New("OPENCODE_WARP_STACK must be ipv6, ipv4 or dual")
+	}
 }
 
 func parseProxyURLs(raw string) ([]*url.URL, error) {

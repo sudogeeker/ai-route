@@ -67,11 +67,10 @@ func agentEnvironment(model string) string {
 }
 
 func agentSystemContent(model, instructions string) string {
-	parts := []string{agentSystemPrompt, agentEnvironment(model)}
+	parts := []string{agentSystemPrompt, agentEnvironment(model), agentSkills}
 	if instructions = strings.TrimSpace(instructions); instructions != "" {
 		parts = append(parts, instructions)
 	}
-	parts = append(parts, agentSkills)
 	return strings.Join(parts, "\n")
 }
 
@@ -81,8 +80,8 @@ func agentPromptMessage(model, instructions string) json.RawMessage {
 }
 
 // injectAgentPrompt builds the single system message used by the 1.19.4 CLI.
-// Caller system content is kept in order after the environment block and before
-// the skills block, matching the CLI's provider/system/instructions assembly.
+// Caller system and developer content are kept in order after the skills block,
+// matching the CLI's final user.system assembly.
 func injectAgentPrompt(body []byte) ([]byte, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
@@ -103,7 +102,7 @@ func injectAgentPrompt(body []byte) ([]byte, error) {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		}
-		if json.Unmarshal(raw, &message) == nil && message.Role == "system" {
+		if json.Unmarshal(raw, &message) == nil && (message.Role == "system" || message.Role == "developer") {
 			if text, ok := systemContentText(message.Content); ok {
 				if text = strings.TrimSpace(text); text != "" {
 					instructions = append(instructions, text)

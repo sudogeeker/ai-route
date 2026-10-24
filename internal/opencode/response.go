@@ -24,6 +24,8 @@ type attemptResult struct {
 	stream     io.Reader
 	err        error
 	retryAfter time.Duration
+	egress     string
+	terminal   bool
 	cleanup    func()
 }
 
@@ -32,13 +34,37 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	cancel := func() { cancelCause(context.Canceled) }
 	grace := p.firstTokenTimeout()
 	deadline := newFirstTokenDeadline(cancelCause)
+	var lease warpEgress
 	defer func() {
 		if deadline.stop() {
 			result.err = fmt.Errorf("%w after %s", errFirstTokenTimeout, grace)
+			p.failWARP(lease, "first-token timeout")
 		}
 	}()
-	transport := p.transport(source)
-	result.cleanup = func() { cancel(); transport.CloseIdleConnections() }
+	var transport *http.Transport
+	if p.usesWARP() {
+		var err error
+		lease, err = p.warpPool.Acquire(ctx)
+		if err != nil {
+			cancel()
+			result.err = fmt.Errorf("acquire WARP egress: %w", err)
+			return result
+		}
+		if p.warpTransport != nil {
+			transport = p.warpTransport(lease)
+		} else {
+			transport = p.newWARPTransport(lease)
+		}
+		result.egress = lease.EgressKey()
+	} else {
+		transport = p.transport(source)
+	}
+	release := func() {
+		if lease != nil {
+			lease.Release()
+		}
+	}
+	result.cleanup = func() { cancel(); transport.CloseIdleConnections(); release() }
 	target := *p.cfg.BaseURL
 	target.Path += "/chat/completions"
 	uploaded := make(chan struct{})
@@ -67,7 +93,7 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	req.Header.Set("x-opencode-session-id", identity.session)
 	req.Header.Set("x-opencode-session", identity.session)
 	req.Header.Set("x-opencode-request", identity.request)
-	req.Header.Set("x-opencode-project", openCodeProjectID)
+	req.Header.Set("x-opencode-project", identity.project)
 	go func() {
 		select {
 		case <-uploaded:
@@ -77,20 +103,33 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	}()
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
+		if ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+			p.failWARP(lease, "transport error")
+		}
 		result.err = err
 		return result
 	}
 	result.response = resp
 	resp.Body = newIdleResponseBody(resp.Body, p.streamIdleTimeout(), cancel)
-	result.cleanup = func() { cancel(); resp.Body.Close(); transport.CloseIdleConnections() }
+	result.cleanup = func() { cancel(); resp.Body.Close(); transport.CloseIdleConnections(); release() }
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
 		result.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		result.terminal = terminalLimit(resp.StatusCode, result.body)
+		if p.warpPool != nil && lease != nil && !result.terminal {
+			p.warpPool.Report(lease, resp.StatusCode, result.body)
+		}
 		result.err = fmt.Errorf("upstream HTTP %d", resp.StatusCode)
 		return result
 	}
+	if p.warpPool != nil && lease != nil {
+		p.warpPool.Report(lease, resp.StatusCode, nil)
+	}
 	if request.streaming {
 		prefix, reader, err := readChatEvent(resp.Body)
+		if err != nil && ctx.Err() == nil {
+			p.failWARP(lease, "stream failure")
+		}
 		result.err = err
 		if err == nil {
 			result.stream = io.MultiReader(bytes.NewReader(prefix), reader)
@@ -99,6 +138,9 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	}
 	result.body, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
+		if ctx.Err() == nil {
+			p.failWARP(lease, "response read failure")
+		}
 		result.err = err
 		return result
 	}
@@ -113,6 +155,26 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 		result.err = errors.New("invalid OpenCode chat response")
 	}
 	return result
+}
+
+// terminalLimit identifies client-fingerprint rejections that no amount of
+// source-IP or WARP rotation can resolve. FreeUsageLimitError is deliberately
+// not terminal: the same request succeeds through WARP IPv4 while WARP IPv6
+// returns it, so it behaves as an egress-level limit in practice.
+func terminalLimit(status int, body []byte) bool {
+	if status != http.StatusForbidden && status != http.StatusTooManyRequests {
+		return false
+	}
+	message := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"freetiererror",
+		"can only be used from within opencode",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type uploadTrackingBody struct {

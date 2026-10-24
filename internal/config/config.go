@@ -28,6 +28,9 @@ type OpenCode struct {
 	BaseURL           *url.URL
 	APIKey            string
 	AuthKey           string
+	WARP              bool
+	WARPPoolSize      int
+	WARPStack         string
 	FreeCompat        bool
 	Models            map[string]bool
 	AllowImplicitFree bool

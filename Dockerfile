@@ -9,5 +9,9 @@ COPY ${TARGETPLATFORM}/ai-route /usr/bin/ai-route
 
 # Optional gateway auth for /opencode/v1 and OpenCode-backed /v1 routes.
 ENV OPENCODE_AUTH_KEY=""
+# Optional direct Cloudflare WARP egress for OpenCode.
+ENV OPENCODE_WARP="false"
+ENV OPENCODE_WARP_POOL_SIZE="2"
+ENV OPENCODE_WARP_STACK="ipv4"
 # Provider endpoints use the program's built-in defaults.
 ENTRYPOINT ["/usr/bin/ai-route"]

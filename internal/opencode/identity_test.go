@@ -67,3 +67,17 @@ func TestIdentifiersConcurrent(t *testing.T) {
 		t.Fatalf("generated %d identifiers, expected %d", len(seen), count)
 	}
 }
+
+func TestRequestIdentityUsesGlobalProject(t *testing.T) {
+	first, err := newRequestIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := newRequestIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.project != "global" || second.project != "global" {
+		t.Fatalf("project IDs do not match the CLI: %q %q", first.project, second.project)
+	}
+}

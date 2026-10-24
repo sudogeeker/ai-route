@@ -7,7 +7,7 @@ import (
 )
 
 func TestOpenCodeConfig(t *testing.T) {
-	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_FIRST_TOKEN_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_COOLDOWN", "OPENCODE_RETRIES", "OPENCODE_MAX_BODY_BYTES", "OPENCODE_CONCURRENCY", "opencode_concurrency", "OPENCODE_LARGE_CONTEXT_BYTES", "OPENCODE_LARGE_CONTEXT_CONCURRENCY", "OPENCODE_PROXY_URL", "OPENCODE_PROXY_URLS"} {
+	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_FIRST_TOKEN_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_COOLDOWN", "OPENCODE_RETRIES", "OPENCODE_MAX_BODY_BYTES", "OPENCODE_CONCURRENCY", "opencode_concurrency", "OPENCODE_LARGE_CONTEXT_BYTES", "OPENCODE_LARGE_CONTEXT_CONCURRENCY", "OPENCODE_PROXY_URL", "OPENCODE_PROXY_URLS", "OPENCODE_WARP", "OPENCODE_WARP_POOL_SIZE", "OPENCODE_WARP_STACK"} {
 		t.Setenv(key, "")
 	}
 	os.Unsetenv("OPENCODE_MODELS")
@@ -18,7 +18,7 @@ func TestOpenCodeConfig(t *testing.T) {
 	// An explicitly empty allowlist is invalid; use a small operator-supplied list here.
 	t.Setenv("OPENCODE_MODELS", "big-pickle,mimo-v2.6-flash-free")
 	cfg, err := loadOpenCode()
-	if err != nil || len(cfg.Models) != 2 || cfg.AllowImplicitFree || cfg.Concurrency != DefaultOpenCodeConcurrency || cfg.LargeContextBytes != DefaultOpenCodeLargeContextBytes || cfg.LargeContextRace != DefaultOpenCodeLargeContextRace || cfg.Retries != DefaultOpenCodeRetries || cfg.WaitTimeout != 180*time.Second || cfg.FirstTokenTimeout != DefaultOpenCodeFirstTokenGrace || cfg.StreamIdleTimeout != 60*time.Second || cfg.Cooldown != DefaultOpenCodeCooldown || cfg.MaxBodyBytes != 64<<20 {
+	if err != nil || len(cfg.Models) != 2 || cfg.AllowImplicitFree || cfg.WARP || cfg.WARPPoolSize != DefaultOpenCodeWARPPoolSize || cfg.WARPStack != DefaultOpenCodeWARPStack || cfg.Concurrency != DefaultOpenCodeConcurrency || cfg.LargeContextBytes != DefaultOpenCodeLargeContextBytes || cfg.LargeContextRace != DefaultOpenCodeLargeContextRace || cfg.Retries != DefaultOpenCodeRetries || cfg.WaitTimeout != 180*time.Second || cfg.FirstTokenTimeout != DefaultOpenCodeFirstTokenGrace || cfg.StreamIdleTimeout != 60*time.Second || cfg.Cooldown != DefaultOpenCodeCooldown || cfg.MaxBodyBytes != 64<<20 {
 		t.Fatalf("bad config: %+v %v", cfg, err)
 	}
 	for _, setting := range []struct{ key, value string }{
@@ -31,6 +31,8 @@ func TestOpenCodeConfig(t *testing.T) {
 		{"OPENCODE_LARGE_CONTEXT_BYTES", "-1"}, {"OPENCODE_LARGE_CONTEXT_BYTES", "invalid"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "0"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "invalid"},
 		{"OPENCODE_PROXY_URLS", "ftp://proxy.example"}, {"OPENCODE_PROXY_URLS", "http://proxy.example/path"}, {"OPENCODE_PROXY_URLS", "http://proxy.example?"},
 		{"OPENCODE_FREE_COMPAT", "invalid"},
+		{"OPENCODE_WARP", "invalid"}, {"OPENCODE_WARP_POOL_SIZE", "0"}, {"OPENCODE_WARP_POOL_SIZE", "17"}, {"OPENCODE_WARP_POOL_SIZE", "invalid"},
+		{"OPENCODE_WARP_STACK", "ipv5"},
 	} {
 		t.Run(setting.key+setting.value, func(t *testing.T) {
 			t.Setenv(setting.key, setting.value)
@@ -46,6 +48,23 @@ func TestOpenCodeConfig(t *testing.T) {
 	t.Setenv("OPENCODE_FREE_COMPAT", "false")
 	if cfg, err := loadOpenCode(); err != nil || cfg.FreeCompat {
 		t.Fatalf("cannot disable compatibility: %+v %v", cfg, err)
+	}
+}
+
+func TestOpenCodeWARP(t *testing.T) {
+	t.Setenv("OPENCODE_WARP", " true ")
+	t.Setenv("OPENCODE_WARP_POOL_SIZE", "3")
+	t.Setenv("OPENCODE_WARP_STACK", " v4 ")
+	cfg, err := loadOpenCode()
+	if err != nil || !cfg.WARP || cfg.WARPPoolSize != 3 || cfg.WARPStack != "ipv4" {
+		t.Fatalf("WARP config was not loaded: %+v %v", cfg, err)
+	}
+	for input, want := range map[string]string{"ipv6": "ipv6", "v6": "ipv6", "ipv4": "ipv4", "v4": "ipv4", "dual": "dual", "both": "dual"} {
+		t.Setenv("OPENCODE_WARP_STACK", input)
+		cfg, err := loadOpenCode()
+		if err != nil || cfg.WARPStack != want {
+			t.Fatalf("WARP stack %q = %q, %v; want %q", input, cfg.WARPStack, err, want)
+		}
 	}
 }
 

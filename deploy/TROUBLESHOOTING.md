@@ -43,9 +43,36 @@ environment:
 
 程序不会使用进程环境中的 `HTTP_PROXY` / `HTTPS_PROXY`，避免它们绕过显式来源绑定。若启动时没有检测到可用 IPv6 网段，只记录 WARN 并继续运行；OpenCode 可直接使用主机默认出口或代理池，Gemini 请求仍需要主机具备可用的 IPv6 出口。可通过 `IPV6_CIDR` / `-cidr` 显式提供来源范围。
 
+## OpenCode WARP 直连出口
+
+设置 `OPENCODE_WARP=true` 后，OpenCode 不再使用 `IPV6_CIDR` / `-cidr` 分配的来源地址，也不再走 `OPENCODE_PROXY_URLS`。程序通过 Cloudflare WARP API 注册独立设备，使用内置 `wireguard-go` 用户态网络栈建立出口；不需要 root、TUN 设备或修改主机路由。启动时会访问 Cloudflare trace 并验证 `warp=on` 及对应的公网 IPv4 或 IPv6 地址。
+
+```yaml
+environment:
+  OPENCODE_WARP: "true"
+  OPENCODE_WARP_POOL_SIZE: "2"
+  OPENCODE_WARP_STACK: "ipv4"
+```
+
+`OPENCODE_WARP_STACK` 默认为 `ipv4`，可选 `ipv4`（别名 `v4`）、`ipv6`（别名 `v6`）或 `dual`（别名 `both`）。`ipv4` 只给 netstack 配置 WARP 分配的 IPv4 地址并通过 IPv4 trace 验证；`dual` 同时配置两族地址，出口实际使用验证成功且可用的地址族。OpenCode 上游会使用该出口对应的 `tcp4` / `tcp6`，不再固定为 IPv6。IPv4 出口按 `/32` 去重和冷却，IPv6 出口按 `/64` 处理。
+
+`OPENCODE_WARP_POOL_SIZE` 默认为 `2`，允许范围是 `1` 到 `16`。池大小大于 `1` 时，程序保留 1 个预注册热备，其余全部作为活动出口轮询分流；例如 `8` 表示 7 个活动出口加 1 个热备。多个活动出口可以避免所有并发请求挤在同一个 WARP 出口上触发单 IP 限流。WARP 模式忽略 `IPV6_CIDR` / `-cidr`，会覆盖代理池配置，但不会改变 Gemini 的来源地址逻辑。
+
+Cloudflare 注册请求之间至少间隔 12 秒，池子越大预热越久，但启动只等待第一个出口，其余出口在后台补齐。经验上，`OPENCODE_CONCURRENCY=10` 可先配 `OPENCODE_WARP_POOL_SIZE=3`；持续高并发或频繁 429 时提高到 `5` 到 `9`，不建议超过实际并发需求。
+
+网络型 HTTP 403 会立即淘汰当前出口并换到热备；没有热备时同步重新注册。响应体包含 `network` 时会记录为网络风控。传输错误、连接中断和首 token 超时也会淘汰对应 WARP 出口，避免在坏隧道上重复重试。任意非 429 响应都会清空该出口的 429 窗口；某个出口连续 10 次上游请求全部返回 429 时淘汰该出口。实际出口 `/32` 或 `/64` 会参与去重并冷却 10 分钟，避免出现“换了 IP、仍共用同一个配额段”的假轮换。旧出口上已经开始的流式响应会继续读取到结束，不会被交换动作截断。
+
+`FreeUsageLimitError`（`Free usage limit reached`）按出口级限流处理：IPv6 WARP 出口实测会返回它，而同一请求改走 WARP IPv4 可正常返回 200，因此不能把它当成账号级终态。网关会继续统计连续 429，某个出口累计 10 次后淘汰并换网。只有 `FreeTierError`（`can only be used from within OpenCode`）这类客户端指纹拒绝仍作为终态，换出口无效；该响应会保留 `Retry-After` 并快速返回 503。
+
+WARP 需要主机允许出站 UDP `2408`（WireGuard 端点）以及 HTTPS 访问 `api.cloudflareclient.com` 和 `1.1.1.1`。注册、握手或 trace 验证失败会阻止启动，而不是静默回退到来源地址池。可用下面的命令单独验证真实 WARP：
+
+```bash
+WARP_LIVE_TEST=1 go test ./internal/warp -run TestWARPLiveRegistration -count=1 -v -timeout 120s
+```
+
 未设置 `OPENCODE_MODELS` 时，除了内置免费模型列表，还接受任意以 `-free` 结尾的模型和 `big-pickle`。显式设置后只允许列表中的模型，避免把未知模型转发到付费上游。
 
-匿名请求按抓取到的 OpenCode `1.19.4` CLI 契约构造：`opencode/1.19.4` User-Agent、每请求 `ses_` / `msg_` 身份、`x-opencode-project: global`、单一 system message（官方 default prompt + 环境 + 调用方指令 + skills）、11 个官方工具定义以及 `max_tokens: 32000`（调用方指定时沿用其值）。这套契约与 2.x 的 header、工具名和 system prompt 不同，不能混用。
+匿名请求按 OpenCode CLI 契约构造：`opencode/1.19.4` User-Agent、每请求 `ses_` / `msg_` 身份、`x-opencode-project: global`、单一 system message（官方 default prompt + 环境 + skills + 调用方 system/developer 指令）、11 个官方工具定义以及 `max_tokens: 32000`（调用方指定时沿用其值）。这套契约与 2.x 的 header、工具名和 system prompt 不同，不能混用。
 
 一旦任何席位返回有效首 token，就取消其余尝试并停止首 token 计时和竞速总计时；后续连续失活仍由 `OPENCODE_STREAM_IDLE_TIMEOUT` 保护。JSON Chat 客户端也先按首 token 选胜者，再只收集胜者的完整回答。Chat SSE 收到 `[DONE]` 后立即释放上游，不再等待对方关闭 TCP 连接。
 

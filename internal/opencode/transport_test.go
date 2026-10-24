@@ -21,6 +21,7 @@ func TestOpenCodeDirectTransportWithoutSource(t *testing.T) {
 	defer server.Close()
 	p := testOpenCodeProxy(t, server.URL)
 	transport := p.newTransport(nil)
+	transport.DialTLSContext = nil
 	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
@@ -86,6 +87,7 @@ func TestOpenCodeProductionTransportIPv6(t *testing.T) {
 	defer server.Close()
 	p := testOpenCodeProxy(t, server.URL)
 	transport := p.newTransport(net.IPv6loopback)
+	transport.DialTLSContext = nil
 	transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
@@ -95,7 +97,7 @@ func TestOpenCodeProductionTransportIPv6(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if string(body) != openCodeOK || transport.Proxy != nil || !transport.DisableKeepAlives {
+	if string(body) != openCodeOK || transport.Proxy != nil || transport.DisableKeepAlives {
 		t.Fatal("production IPv6 transport failed")
 	}
 }
@@ -118,6 +120,7 @@ func TestOpenCodeProductionHTTP1AttemptBudget(t *testing.T) {
 	p.transport = func(source net.IP) *http.Transport {
 		transport := p.newTransport(source)
 		transport.DialContext = (&net.Dialer{Timeout: time.Second}).DialContext
+		transport.DialTLSContext = nil
 		transport.TLSClientConfig = server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 		return transport
 	}

@@ -14,6 +14,7 @@ import (
 	"aizasy.pages.dev/ai-route/internal/logging"
 	"aizasy.pages.dev/ai-route/internal/opencode"
 	"aizasy.pages.dev/ai-route/internal/server"
+	"aizasy.pages.dev/ai-route/internal/warp"
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
@@ -43,7 +44,22 @@ func Run(ctx context.Context, cfg config.Config) error {
 	go func() { defer close(updaterDone); google.Run(updaterCtx) }()
 	defer func() { stopUpdater(); <-updaterDone }()
 
-	free := opencode.New(cfg.OpenCode, sources, logger)
+	var warpPool *warp.Pool
+	if cfg.OpenCode.WARP {
+		stack, parseErr := warp.ParseStack(cfg.OpenCode.WARPStack)
+		if parseErr != nil {
+			return fmt.Errorf("parse OpenCode WARP stack: %w", parseErr)
+		}
+		warpPool, err = warp.NewWithStack(ctx, logger, cfg.OpenCode.WARPPoolSize, stack)
+		if err != nil {
+			return fmt.Errorf("initialize OpenCode WARP egress: %w", err)
+		}
+		defer warpPool.Close()
+		if len(cfg.OpenCode.ProxyURLs) != 0 {
+			logger.Warnf("OPENCODE_WARP takes precedence over OPENCODE_PROXY_URLS")
+		}
+	}
+	free := opencode.NewWithWARP(cfg.OpenCode, sources, logger, warpPool)
 	if cfg.OpenCode.AuthKey == "" {
 		logger.Warnf("OPENCODE_AUTH_KEY is not set; OpenCode endpoints are unauthenticated")
 	}

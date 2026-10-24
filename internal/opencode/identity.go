@@ -12,11 +12,8 @@ const identifierChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 type requestIdentity struct {
 	session string
 	request string
+	project string
 }
-
-// openCodeProjectID is the stateless CLI project fingerprint. The captured
-// anonymous request uses the global project rather than hashing the session.
-const openCodeProjectID = "global"
 
 type identifierGenerator struct {
 	mu        sync.Mutex
@@ -33,7 +30,10 @@ func newRequestIdentity() (requestIdentity, error) {
 		return requestIdentity{}, err
 	}
 	request, err := identifiers.next("msg", false, now)
-	return requestIdentity{session: session, request: request}, err
+	if err != nil {
+		return requestIdentity{}, err
+	}
+	return requestIdentity{session: session, request: request, project: "global"}, err
 }
 
 // next matches the OpenCode client's six-byte time/counter encoding and random

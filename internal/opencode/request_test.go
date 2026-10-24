@@ -174,8 +174,37 @@ func TestPrepareChatInjectsOfficialPrompt(t *testing.T) {
 	var system struct {
 		Content string `json:"content"`
 	}
-	if json.Unmarshal(messages[0], &system) != nil || !strings.Contains(system.Content, "client instructions") || !strings.Contains(system.Content, "\nclient instructions\nSkills provide") || string(messages[1]) != `{"role":"user","content":"hi"}` {
+	if json.Unmarshal(messages[0], &system) != nil || !strings.HasSuffix(system.Content, agentSkills+"\nclient instructions") || string(messages[1]) != `{"role":"user","content":"hi"}` {
 		t.Fatalf("caller messages changed: %s", messages)
+	}
+}
+
+func TestPrepareChatMergesSystemAndDeveloperInstructions(t *testing.T) {
+	body := []byte(`{"model":"big-pickle","messages":[{"role":"system","content":"first instructions"},{"role":"developer","content":[{"type":"text","text":"second instructions"},{"type":"input_text","text":"third instructions"}]},{"role":"user","content":"hi"}]}`)
+	prepared, err := prepareChat(body, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(prepared.body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	messages := decodedMessages(t, fields["messages"])
+	if len(messages) != 2 {
+		t.Fatalf("system and developer messages were not merged: %s", messages)
+	}
+	var system struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(messages[0], &system); err != nil {
+		t.Fatal(err)
+	}
+	if system.Role != "system" || !strings.HasSuffix(system.Content, agentSkills+"\nfirst instructions\nsecond instructions\nthird instructions") {
+		t.Fatalf("caller instructions were not merged after skills: %s", messages[0])
+	}
+	if string(messages[1]) != `{"role":"user","content":"hi"}` {
+		t.Fatalf("user message changed: %s", messages[1])
 	}
 }
 

@@ -34,11 +34,17 @@ type Proxy struct {
 	sourceCapacity  func(int) int
 	cooldown        func(net.IP, time.Duration)
 	transport       func(net.IP) *http.Transport
+	warpTransport   func(warpEgress) *http.Transport
+	warpPool        warpPool
 	firstTokenGrace func() time.Duration
 	proxyIndex      atomic.Uint64
 }
 
 func New(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
+	return newProxy(cfg, sources, logger)
+}
+
+func newProxy(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
 	p := &Proxy{
 		cfg:    cfg,
 		logger: logger,
@@ -50,6 +56,7 @@ func New(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) 
 		p.cooldown = sources.Cooldown
 	}
 	p.transport = p.newTransport
+	p.warpTransport = p.newWARPTransport
 	return p
 }
 
@@ -84,7 +91,11 @@ func (p *Proxy) concurrency() int {
 }
 
 func (p *Proxy) usesIPv6Sources() bool {
-	return len(p.cfg.ProxyURLs) == 0 && p.sources != nil
+	return !p.usesWARP() && len(p.cfg.ProxyURLs) == 0 && p.sources != nil
+}
+
+func (p *Proxy) usesWARP() bool {
+	return p.cfg.WARP && p.warpPool != nil
 }
 
 func (p *Proxy) retryBudget() int {
@@ -96,6 +107,9 @@ func (p *Proxy) retryBudget() int {
 
 func (p *Proxy) raceCount(bodyBytes int) int {
 	count := p.concurrency()
+	if p.usesWARP() {
+		return 1
+	}
 	if p.cfg.LargeContextBytes > 0 && int64(bodyBytes) >= p.cfg.LargeContextBytes {
 		limit := p.cfg.LargeContextRace
 		if limit <= 0 {
@@ -125,6 +139,9 @@ func (p *Proxy) raceCount(bodyBytes int) int {
 }
 
 func (p *Proxy) canRotate() bool {
+	if p.usesWARP() {
+		return true
+	}
 	if p.usesIPv6Sources() {
 		return true
 	}
@@ -357,7 +374,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 				if result.response != nil {
 					status = result.response.StatusCode
 				}
-				p.logger.Debugf("OpenCode attempt=%d source=%s status=%d error=%v", outcome.index+1, sources[outcome.index], status, result.err)
+				p.logger.Debugf("OpenCode attempt=%d source=%s warp=%s status=%d error=%v", outcome.index+1, sources[outcome.index], result.egress, status, result.err)
 			}
 			if result.err != nil {
 				lastErr = result.err
@@ -372,6 +389,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 				firstTokenTimeout := errors.Is(result.err, errFirstTokenTimeout)
 				sourceDependent := result.response != nil && (result.response.StatusCode == http.StatusForbidden || result.response.StatusCode == http.StatusTooManyRequests)
 				canRetry := (firstTokenTimeout || retryableResult(&result)) && (firstTokenTimeout || retries > 0)
+				if result.terminal {
+					canRetry = false
+				}
 				if sourceDependent && !p.canRotate() {
 					canRetry = false
 				}
@@ -419,6 +439,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, request chatReques
 	}
 	if lastHTTP != nil {
 		if lastHTTP.response.StatusCode == http.StatusTooManyRequests {
+			if lastHTTP.terminal {
+				if retryAfter := lastHTTP.response.Header.Get("Retry-After"); retryAfter != "" {
+					w.Header().Set("Retry-After", retryAfter)
+				}
+				httpx.WriteError(w, http.StatusServiceUnavailable, "upstream_rate_limit", "OpenCode free usage quota is exhausted; WARP or source rotation cannot bypass this limit")
+				return
+			}
 			httpx.WriteError(w, http.StatusServiceUnavailable, "upstream_rate_limit", "OpenCode upstream returned HTTP 429")
 			return
 		}
