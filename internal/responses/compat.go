@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -18,23 +17,6 @@ type CompatCall struct {
 	ID        string
 	Name      string
 	Arguments string
-}
-
-type recordingReader struct {
-	reader io.Reader
-	seen   bytes.Buffer
-}
-
-func (r *recordingReader) Read(p []byte) (int, error) {
-	n, err := r.reader.Read(p)
-	if n > 0 {
-		r.seen.Write(p[:n])
-	}
-	return n, err
-}
-
-func (r *recordingReader) replay() io.Reader {
-	return io.MultiReader(bytes.NewReader(r.seen.Bytes()), r.reader)
 }
 
 type pendingCall struct {
@@ -58,85 +40,25 @@ func (p *Plan) ProbeCompat(stream io.Reader) ([]CompatCall, io.Reader, error) {
 	if len(p.compat) == 0 {
 		return nil, stream, nil
 	}
-	recorder := &recordingReader{reader: stream}
-	scanner := bufio.NewScanner(recorder)
-	scanner.Buffer(make([]byte, 4096), maxSSELine)
-	var data []string
-	event, eventBytes, totalBytes := "", 0, 0
+	var seen bytes.Buffer
+	events := newChatStream(io.TeeReader(stream, &seen))
+	replay := io.MultiReader(&seen, stream)
 	calls := make(map[int]*pendingCall)
-	startedTools := false
 	textBytes := 0
-	for scanner.Scan() {
-		line := scanner.Text()
-		eventBytes += len(line) + 1
-		totalBytes += len(line) + 1
-		if eventBytes > maxSSELine {
-			return nil, nil, errors.New("Chat stream event exceeds buffer limit")
+	for {
+		chunk, err := events.next()
+		if err != nil {
+			return nil, nil, err
 		}
-		if totalBytes > maxResponseStream {
-			return nil, nil, errors.New("Chat stream response exceeds buffer limit")
-		}
-		if line != "" {
-			field, value, _ := strings.Cut(line, ":")
-			value = strings.TrimPrefix(value, " ")
-			switch field {
-			case "data":
-				data = append(data, value)
-			case "event":
-				event = value
-			}
-			continue
-		}
-		if event == "error" {
-			return nil, nil, errors.New("Chat stream returned an error event")
-		}
-		payload := strings.Join(data, "\n")
-		data, event, eventBytes = nil, "", 0
-		if payload == "" {
-			continue
-		}
-		if payload == "[DONE]" {
-			return p.compatDecision(calls, recorder)
-		}
-		var chunk struct {
-			Type    json.RawMessage `json:"type"`
-			Error   json.RawMessage `json:"error"`
-			Choices []struct {
-				Index        *int            `json:"index"`
-				FinishReason json.RawMessage `json:"finish_reason"`
-				Delta        struct {
-					Content   json.RawMessage `json:"content"`
-					ToolCalls []struct {
-						Index    *int   `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string          `json:"name"`
-							Arguments json.RawMessage `json:"arguments"`
-						} `json:"function"`
-						Custom struct {
-							Name  string          `json:"name"`
-							Input json.RawMessage `json:"input"`
-						} `json:"custom"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return nil, nil, fmt.Errorf("invalid Chat stream JSON: %w", err)
-		}
-		if present(chunk.Error) || stringField(chunk.Type) == "error" {
-			return nil, nil, errors.New("Chat stream returned an error payload")
+		if chunk == nil {
+			return p.compatDecision(calls, replay)
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Index != nil && *choice.Index != 0 {
 				continue
 			}
 			for position, call := range choice.Delta.ToolCalls {
-				index := position
-				if call.Index != nil {
-					index = *call.Index
-				}
+				index, name, arguments, _ := call.fields(position)
 				pending := calls[index]
 				if pending == nil {
 					pending = &pendingCall{}
@@ -145,36 +67,25 @@ func (p *Plan) ProbeCompat(stream io.Reader) ([]CompatCall, io.Reader, error) {
 				if call.ID != "" {
 					pending.id = call.ID
 				}
-				name, arguments := call.Function.Name, rawText(call.Function.Arguments)
-				if call.Custom.Name != "" {
-					name, arguments = call.Custom.Name, rawText(call.Custom.Input)
-				}
 				if name != "" {
 					pending.name = name
 				}
 				pending.arguments.WriteString(arguments)
-				startedTools = true
 			}
-			if text := deltaText(choice.Delta.Content); text != "" {
-				textBytes += len(text)
-			}
-			if !startedTools && textBytes >= compatTextLookahead {
+			textBytes += len(deltaText(choice.Delta.Content))
+			if len(calls) == 0 && textBytes >= compatTextLookahead {
 				// No tool call has begun and the text prefix is large enough to
 				// be an ordinary answer. Stream the buffered bytes and continue.
-				return nil, recorder.replay(), nil
+				return nil, replay, nil
 			}
 			if present(choice.FinishReason) {
-				return p.compatDecision(calls, recorder)
+				return p.compatDecision(calls, replay)
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, nil, err
-	}
-	return nil, nil, errors.New("Chat stream ended before [DONE]")
 }
 
-func (p *Plan) compatDecision(calls map[int]*pendingCall, recorder *recordingReader) ([]CompatCall, io.Reader, error) {
+func (p *Plan) compatDecision(calls map[int]*pendingCall, replay io.Reader) ([]CompatCall, io.Reader, error) {
 	indexes := make([]int, 0, len(calls))
 	for index := range calls {
 		indexes = append(indexes, index)
@@ -199,7 +110,7 @@ func (p *Plan) compatDecision(calls map[int]*pendingCall, recorder *recordingRea
 	if len(compat) != 0 {
 		return compat, nil, nil
 	}
-	return nil, recorder.replay(), nil
+	return nil, replay, nil
 }
 
 // CallerTools lists the upstream wire names of the caller tools that were sent

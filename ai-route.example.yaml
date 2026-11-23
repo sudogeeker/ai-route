@@ -1,0 +1,51 @@
+listen: ":8080"
+log:
+  level: ERROR
+  file: ""
+
+ipv6:
+  source_cidrs: []
+
+gemini:
+  enabled: true
+  target_host: generativelanguage.googleapis.com
+  ip_family: ipv6
+  dns_refresh_interval: 10m
+  destination_ips: []
+  doh:
+    url: ""
+    bootstrap_ips: []
+
+openai:
+  enabled: false
+  inbound_host: ""
+  target_host: api.openai.com
+  ip_family: dual
+  dns_refresh_interval: 10m
+  destination_ips: []
+  doh:
+    url: ""
+    bootstrap_ips: []
+
+opencode:
+  enabled: false
+  base_url: https://opencode.ai/inference/openai/v1
+  auth_key: ""
+  api_key: ""
+  free_compat: true
+  # models: [big-pickle]
+  concurrency: 10
+  large_context_bytes: 262144
+  large_context_concurrency: 2
+  retries: 10
+  wait_timeout: 180s
+  first_token_timeout: 60s
+  stream_idle_timeout: 60s
+  cooldown: 10m
+  max_body_bytes: 67108864
+  proxy_urls: []
+  warp: false
+  warp_pool_size: 2
+  warp_stack: ipv4
+  workspace: ""
+  workspace_root: ""

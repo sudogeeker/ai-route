@@ -71,7 +71,7 @@ func hasAgentPrompt(raw json.RawMessage) bool {
 func TestPrepareChatCompatibility(t *testing.T) {
 	for _, streaming := range []bool{false, true} {
 		body := []byte(`{"model":"big-pickle","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,YQ=="}},{"type":"input_audio","input_audio":{"data":"YQ==","format":"wav"}}]}],"vendor":{"large":9007199254740993},"stream_options":{"vendor_option":true}}`)
-		prepared, err := prepareChat(body, streaming, true)
+		prepared, err := (promptWorkspace{}).prepareChat(body, streaming, true)
 		if err != nil || !prepared.streaming || prepared.collect == streaming {
 			t.Fatalf("bad compatibility plan: %+v %v", prepared, err)
 		}
@@ -112,7 +112,7 @@ func TestPrepareChatCompatibility(t *testing.T) {
 
 func TestPrepareChatMergesAgentTools(t *testing.T) {
 	body := []byte(`{"model":"big-pickle","messages":[],"tools":[{"type":"function","function":{"name":"mine","description":"keep","parameters":{"type":"object","properties":{"x":{"type":"string"}}}}},{"type":"function","function":{"name":"read","description":"stub","parameters":{"type":"object","properties":{}}}}],"tool_choice":"required"}`)
-	prepared, err := prepareChat(body, false, true)
+	prepared, err := (promptWorkspace{}).prepareChat(body, false, true)
 	if err != nil || !prepared.streaming || !prepared.collect {
 		t.Fatalf("bad shaped plan: %+v %v", prepared, err)
 	}
@@ -135,12 +135,12 @@ func TestPrepareChatMergesAgentTools(t *testing.T) {
 
 func TestPrepareChatPassThrough(t *testing.T) {
 	body := `{ "model": "big-pickle", "messages": [] }`
-	prepared, err := prepareChat([]byte(body), false, false)
+	prepared, err := (promptWorkspace{}).prepareChat([]byte(body), false, false)
 	if err != nil || string(prepared.body) != body || prepared.streaming || prepared.collect {
 		t.Fatalf("caller contract changed: %+v %v", prepared, err)
 	}
 	legacy := []byte(`{ "functions": [{"name":"legacy"}], "function_call":"auto" }`)
-	prepared, err = prepareChat(legacy, false, true)
+	prepared, err = (promptWorkspace{}).prepareChat(legacy, false, true)
 	if err != nil || prepared.streaming || prepared.collect {
 		t.Fatalf("legacy compatibility changed: %+v %v", prepared, err)
 	}
@@ -152,14 +152,14 @@ func TestPrepareChatPassThrough(t *testing.T) {
 		t.Fatalf("legacy request was not completed correctly: %s", prepared.body)
 	}
 	for _, body := range []string{`null`, `[]`, `{"tools":{}}`, `{"tool_choice":"required"}`, `{"tool_choice":{"type":"function"}}`, `{"stream_options":[]}`} {
-		if _, err := prepareChat([]byte(body), false, true); err == nil {
+		if _, err := (promptWorkspace{}).prepareChat([]byte(body), false, true); err == nil {
 			t.Errorf("invalid compatibility request accepted: %s", body)
 		}
 	}
 }
 
 func TestPrepareChatInjectsEnvironmentAndInstructions(t *testing.T) {
-	prepared, err := prepareChat([]byte(`{"model":"big-pickle","messages":[{"role":"system","content":"client instructions"},{"role":"user","content":"hi"}]}`), true, true)
+	prepared, err := (promptWorkspace{}).prepareChat([]byte(`{"model":"big-pickle","messages":[{"role":"system","content":"client instructions"},{"role":"user","content":"hi"}]}`), true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestPrepareChatInjectsEnvironmentAndInstructions(t *testing.T) {
 
 func TestPrepareChatMergesSystemAndDeveloperInstructions(t *testing.T) {
 	body := []byte(`{"model":"big-pickle","messages":[{"role":"system","content":"first instructions"},{"role":"developer","content":[{"type":"text","text":"second instructions"},{"type":"input_text","text":"third instructions"}]},{"role":"user","content":"hi"}]}`)
-	prepared, err := prepareChat(body, true, true)
+	prepared, err := (promptWorkspace{}).prepareChat(body, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestPrepareChatMergesSystemAndDeveloperInstructions(t *testing.T) {
 func TestPrepareChatStripsUnsupportedClientMetadata(t *testing.T) {
 	body := []byte(`{"model":"big-pickle","messages":[],"metadata":{"trace":"one"},"client_metadata":{"trace":"two"},"vendor":{"keep":true}}`)
 	for _, compatibility := range []bool{false, true} {
-		prepared, err := prepareChat(body, false, compatibility)
+		prepared, err := (promptWorkspace{}).prepareChat(body, false, compatibility)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestPrepareChatStripsUnsupportedClientMetadata(t *testing.T) {
 
 func TestPreparedChatMatchesCaptured1194Contract(t *testing.T) {
 	body := []byte(`{"model":"big-pickle","messages":[{"role":"user","content":"Reply exactly OK. Do not use tools."}]}`)
-	prepared, err := prepareChat(body, true, true)
+	prepared, err := (promptWorkspace{}).prepareChat(body, true, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,6 +272,7 @@ func TestPreparedChatMatchesCaptured1194Contract(t *testing.T) {
 			Name string `json:"name"`
 		} `json:"function"`
 	}
+	toolNames := []string{"bash", "edit", "glob", "grep", "read", "skill", "task", "todowrite", "webfetch", "websearch", "write"}
 	if json.Unmarshal(fields["tools"], &tools) != nil || len(tools) != len(toolNames) {
 		t.Fatalf("wrong captured tools: %s", fields["tools"])
 	}
@@ -287,7 +288,7 @@ func TestPrepareChatNormalizesTokenLimits(t *testing.T) {
 		`{"model":"big-pickle","messages":[],"max_completion_tokens":123}`,
 		`{"model":"big-pickle","messages":[],"max_output_tokens":123}`,
 	} {
-		prepared, err := prepareChat([]byte(body), true, true)
+		prepared, err := (promptWorkspace{}).prepareChat([]byte(body), true, true)
 		if err != nil {
 			t.Fatal(err)
 		}

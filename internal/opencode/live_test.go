@@ -60,7 +60,7 @@ func TestOpenCodeLiveFreeChat(t *testing.T) {
 				t.Fatal(err)
 			}
 			started := time.Now()
-			request, err := prepareChat(body, streaming, true)
+			request, err := (promptWorkspace{}).prepareChat(body, streaming, true)
 			if err != nil {
 				t.Fatal(err)
 			}

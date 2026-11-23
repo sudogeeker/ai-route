@@ -163,7 +163,7 @@ func testOpenCodeProxy(t *testing.T, upstreamURL string) *Proxy {
 }
 
 func testOpenCodeHandler(p *Proxy) http.Handler {
-	return routing.NewRouter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(418) }), p, "", p.cfg.MaxBodyBytes)
+	return routing.NewRouter(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(418) }), nil, p, "", p.cfg.MaxBodyBytes, "")
 }
 
 func openCodeTestRequest(body string) *http.Request {

@@ -14,25 +14,9 @@ func parseIPv6CIDRs(cidrs []string) ([]*net.IPNet, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid CIDR %q: %v", token, err)
 			}
-			if n == nil || n.IP == nil {
-				return nil, fmt.Errorf("invalid CIDR %q", token)
-			}
-			ip := n.IP.To16()
-			if ip == nil || ip.To4() != nil {
+			if n.IP.To4() != nil {
 				return nil, fmt.Errorf("CIDR must be IPv6: %q", token)
 			}
-			if len(n.Mask) != 16 {
-				return nil, fmt.Errorf("CIDR mask must be IPv6: %q", token)
-			}
-			ones, bits := n.Mask.Size()
-			if bits != 128 {
-				return nil, fmt.Errorf("CIDR mask bits must be 128: %q", token)
-			}
-			if ones > 64 {
-				return nil, fmt.Errorf("CIDR prefix must be <= 64 for /64 splitting: %q", token)
-			}
-			// Normalize IP to masked network address
-			n.IP = ip.Mask(n.Mask)
 			out = append(out, n)
 		}
 	}
@@ -64,11 +48,8 @@ func detectLocalIPv6Subnet() (*net.IPNet, error) {
 		return nil, err
 	}
 
-	type cand struct {
-		net   *net.IPNet
-		score int
-	}
-	var best *cand
+	var best *net.IPNet
+	bestPrefix := 128
 
 	for _, ifc := range ifaces {
 		// Skip down or loopback interfaces
@@ -82,50 +63,28 @@ func detectLocalIPv6Subnet() (*net.IPNet, error) {
 		}
 		for _, a := range addrs {
 			ipnet, ok := a.(*net.IPNet)
-			if !ok || ipnet == nil || ipnet.IP == nil {
+			if !ok || ipnet == nil {
 				continue
 			}
 			ip := ipnet.IP.To16()
-			if ip == nil || ip.To4() != nil {
-				continue
-			}
-			// Skip link-local and multicast
-			if ip.IsLinkLocalUnicast() || ip.IsMulticast() {
+			if ip.To4() != nil || !ip.IsGlobalUnicast() {
 				continue
 			}
 			// Skip unique local (fc00::/7) to avoid selecting private-only ranges by default
-			if len(ip) == 16 && (ip[0]&0xfe) == 0xfc {
-				continue
-			}
-			if !ip.IsGlobalUnicast() {
+			if (ip[0] & 0xfe) == 0xfc {
 				continue
 			}
 
 			ones, bits := ipnet.Mask.Size()
-			if bits != 128 || ones >= 128 {
-				continue
-			}
-
-			networkIP := ip.Mask(ipnet.Mask)
-			n := &net.IPNet{IP: networkIP, Mask: ipnet.Mask}
-
-			// Heuristic scoring:
-			// Prefer prefix <= 64 (common routed subnets) and bigger subnets (smaller ones value)
-			score := 0
-			if ones <= 64 {
-				score += 1000
-			}
-			// Slightly prefer typical /64 over very small ranges like /120
-			score += (128 - ones)
-
-			if best == nil || score > best.score {
-				best = &cand{net: n, score: score}
+			if bits == 128 && ones < bestPrefix {
+				bestPrefix = ones
+				best = &net.IPNet{IP: ip.Mask(ipnet.Mask), Mask: ipnet.Mask}
 			}
 		}
 	}
 
-	if best == nil || best.net == nil {
+	if best == nil {
 		return nil, fmt.Errorf("no suitable IPv6 subnet found")
 	}
-	return best.net, nil
+	return best, nil
 }

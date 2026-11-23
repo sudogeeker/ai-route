@@ -3,6 +3,9 @@
 /ai-route.exe
 main
 
+# Local configuration may contain credentials
+/ai-route.yaml
+
 # Logs
 *.log
 *.out

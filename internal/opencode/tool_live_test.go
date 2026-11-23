@@ -33,7 +33,7 @@ func TestOpenCodeLiveToolRoundTrip(t *testing.T) {
 		return transport
 	}
 	var tools []json.RawMessage
-	if err := json.Unmarshal(chatTools, &tools); err != nil {
+	if err := json.Unmarshal(toolsJSON, &tools); err != nil {
 		t.Fatal(err)
 	}
 	custom := json.RawMessage(`{"type":"function","function":{"name":"route_echo","description":"Return the supplied text.","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}}}`)

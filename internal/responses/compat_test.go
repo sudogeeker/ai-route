@@ -20,7 +20,8 @@ func compatTestPlan(t *testing.T) *Plan {
 
 func TestProbeCompatReplaysTextStream(t *testing.T) {
 	plan := compatTestPlan(t)
-	stream := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	stream := ": heartbeat\r\n\r\ndata: {\"choices\":\r\ndata: [{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\r\n\r\n:" +
+		strings.Repeat("x", 8192) + "\r\n\r\ndata: [DONE]\r\n\r\n"
 	calls, replay, err := plan.ProbeCompat(strings.NewReader(stream))
 	if err != nil || len(calls) != 0 {
 		t.Fatalf("unexpected probe result: calls=%v err=%v", calls, err)

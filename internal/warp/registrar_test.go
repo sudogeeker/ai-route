@@ -12,6 +12,7 @@ import (
 
 func TestRegisterCloudflareDevice(t *testing.T) {
 	var requests []string
+	var publicKey string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		if r.Header.Get("CF-Client-Version") != "a-6.10-2158" || r.Header.Get("User-Agent") != "okhttp/3.12.1" {
@@ -23,7 +24,8 @@ func TestRegisterCloudflareDevice(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			key, err := base64.StdEncoding.DecodeString(body["key"])
+			publicKey = body["key"]
+			key, err := base64.StdEncoding.DecodeString(publicKey)
 			if err != nil || len(key) != 32 || body["model"] != "PC" || body["locale"] != "en_US" {
 				t.Errorf("invalid registration: %v %v", body, err)
 			}
@@ -61,13 +63,13 @@ func TestRegisterCloudflareDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.ID != "device-id" || reg.Token != "device-token" || reg.AddressV6 != "2606:4700:110::2" || reg.PeerPublicKey != defaultPeer || reg.Endpoint != "162.159.192.4:2408" {
+	if reg.ID != "device-id" || reg.AddressV6 != "2606:4700:110::2" || reg.PeerPublicKey != defaultPeer {
 		t.Fatalf("unexpected registration: %+v", reg)
 	}
-	if len(reg.Endpoints) < 4 || reg.Endpoints[1] != "[2606:4700:d0::a29f:c004]:2408" || reg.Endpoints[2] != "engage.cloudflareclient.com:2408" {
+	if len(reg.Endpoints) < 4 || reg.Endpoints[0] != "162.159.192.4:2408" || reg.Endpoints[1] != "[2606:4700:d0::a29f:c004]:2408" || reg.Endpoints[2] != "engage.cloudflareclient.com:2408" {
 		t.Fatalf("unexpected endpoint priority: %v", reg.Endpoints)
 	}
-	if reg.PrivateKey == "" || reg.PublicKey == "" || reg.PrivateKey == reg.PublicKey {
+	if reg.PrivateKey == "" || reg.PrivateKey == publicKey {
 		t.Fatalf("invalid keypair: %+v", reg)
 	}
 	if got := strings.Join(requests, ","); got != "POST /reg,PATCH /reg/device-id,GET /reg/device-id" {

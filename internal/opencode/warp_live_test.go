@@ -49,7 +49,7 @@ func TestOpenCodeLiveWARPChat(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request, err := prepareChat(body, false, true)
+		request, err := (promptWorkspace{}).prepareChat(body, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}

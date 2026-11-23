@@ -1,135 +1,91 @@
 package config
 
 import (
-	"os"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestOpenCodeConfig(t *testing.T) {
-	for _, key := range []string{"OPENCODE_BASE_URL", "OPENCODE_API_KEY", "OPENCODE_AUTH_KEY", "opencode_auth_key", "OPENCODE_FREE_COMPAT", "OPENCODE_MODELS", "OPENCODE_WAIT_TIMEOUT", "OPENCODE_FIRST_TOKEN_TIMEOUT", "OPENCODE_STREAM_IDLE_TIMEOUT", "OPENCODE_COOLDOWN", "OPENCODE_RETRIES", "OPENCODE_MAX_BODY_BYTES", "OPENCODE_CONCURRENCY", "opencode_concurrency", "OPENCODE_LARGE_CONTEXT_BYTES", "OPENCODE_LARGE_CONTEXT_CONCURRENCY", "OPENCODE_PROXY_URL", "OPENCODE_PROXY_URLS", "OPENCODE_WARP", "OPENCODE_WARP_POOL_SIZE", "OPENCODE_WARP_STACK"} {
-		t.Setenv(key, "")
+func TestOpenCodeYAML(t *testing.T) {
+	defaults, err := decode(strings.NewReader("opencode: {enabled: true}"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	os.Unsetenv("OPENCODE_MODELS")
-	defaults, err := loadOpenCode()
-	if err != nil || len(defaults.Models) != 46 || defaults.Models["jev-1.13-free"] || !defaults.Models["flint-40b-free"] || !defaults.FreeCompat || !defaults.AllowImplicitFree || defaults.LargeContextBytes != DefaultOpenCodeLargeContextBytes || defaults.LargeContextRace != DefaultOpenCodeLargeContextRace {
-		t.Fatalf("bad default model list: %+v %v", defaults.Models, err)
+	opts := defaults.OpenCode
+	if opts == nil || len(opts.Models) != 46 || opts.Models["jev-1.13-free"] || !opts.Models["flint-40b-free"] ||
+		!opts.AllowImplicitFree || !opts.FreeCompat || opts.WARP || opts.WARPPoolSize != DefaultOpenCodeWARPPoolSize ||
+		opts.WARPStack != DefaultOpenCodeWARPStack || opts.Concurrency != DefaultOpenCodeConcurrency ||
+		opts.Retries != DefaultOpenCodeRetries || opts.FirstTokenTimeout != DefaultOpenCodeFirstTokenGrace ||
+		opts.StreamIdleTimeout != time.Minute || opts.WaitTimeout != 3*time.Minute || opts.Cooldown != DefaultOpenCodeCooldown ||
+		opts.MaxBodyBytes != 64<<20 || opts.LargeContextBytes != DefaultOpenCodeLargeContextBytes ||
+		opts.LargeContextRace != DefaultOpenCodeLargeContextRace {
+		t.Fatalf("unexpected OpenCode defaults: %+v", opts)
 	}
-	// An explicitly empty allowlist is invalid; use a small operator-supplied list here.
-	t.Setenv("OPENCODE_MODELS", "big-pickle,mimo-v2.6-flash-free")
-	cfg, err := loadOpenCode()
-	if err != nil || len(cfg.Models) != 2 || cfg.AllowImplicitFree || cfg.WARP || cfg.WARPPoolSize != DefaultOpenCodeWARPPoolSize || cfg.WARPStack != DefaultOpenCodeWARPStack || cfg.Concurrency != DefaultOpenCodeConcurrency || cfg.LargeContextBytes != DefaultOpenCodeLargeContextBytes || cfg.LargeContextRace != DefaultOpenCodeLargeContextRace || cfg.Retries != DefaultOpenCodeRetries || cfg.WaitTimeout != 180*time.Second || cfg.FirstTokenTimeout != DefaultOpenCodeFirstTokenGrace || cfg.StreamIdleTimeout != 60*time.Second || cfg.Cooldown != DefaultOpenCodeCooldown || cfg.MaxBodyBytes != 64<<20 {
-		t.Fatalf("bad config: %+v %v", cfg, err)
+
+	cfg, err := decode(strings.NewReader(`
+gemini:
+  enabled: false
+opencode:
+  enabled: true
+  base_url: https://inference.example/v1/
+  auth_key: " local-key "
+  api_key: upstream-key
+  free_compat: false
+  models: [big-pickle, mimo-v2.6-flash-free]
+  concurrency: 32
+  large_context_bytes: 0
+  retries: 0
+  cooldown: 0s
+  stream_idle_timeout: 15s
+  warp: true
+  warp_pool_size: 3
+  warp_stack: v6
+  proxy_urls: ["http://user:pass@proxy.example:8080", "socks5h://127.0.0.1:1080"]
+  workspace: /workspace/project
+  workspace_root: /workspace
+`))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, setting := range []struct{ key, value string }{
-		{"OPENCODE_BASE_URL", "http://example.com"}, {"OPENCODE_BASE_URL", "https://key@example.com"}, {"OPENCODE_BASE_URL", "https://example.com?key=secret"},
-		{"OPENCODE_WAIT_TIMEOUT", "0s"}, {"OPENCODE_MAX_BODY_BYTES", "-1"}, {"OPENCODE_MODELS", ""}, {"OPENCODE_MODELS", "opencode/big-pickle"},
-		{"OPENCODE_STREAM_IDLE_TIMEOUT", "0s"}, {"OPENCODE_STREAM_IDLE_TIMEOUT", "invalid"},
-		{"OPENCODE_FIRST_TOKEN_TIMEOUT", "0s"}, {"OPENCODE_FIRST_TOKEN_TIMEOUT", "invalid"},
-		{"OPENCODE_COOLDOWN", "-1s"}, {"OPENCODE_COOLDOWN", "invalid"},
-		{"OPENCODE_RETRIES", "-1"}, {"OPENCODE_RETRIES", "invalid"},
-		{"OPENCODE_LARGE_CONTEXT_BYTES", "-1"}, {"OPENCODE_LARGE_CONTEXT_BYTES", "invalid"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "0"}, {"OPENCODE_LARGE_CONTEXT_CONCURRENCY", "invalid"},
-		{"OPENCODE_PROXY_URLS", "ftp://proxy.example"}, {"OPENCODE_PROXY_URLS", "http://proxy.example/path"}, {"OPENCODE_PROXY_URLS", "http://proxy.example?"},
-		{"OPENCODE_FREE_COMPAT", "invalid"},
-		{"OPENCODE_WARP", "invalid"}, {"OPENCODE_WARP_POOL_SIZE", "0"}, {"OPENCODE_WARP_POOL_SIZE", "17"}, {"OPENCODE_WARP_POOL_SIZE", "invalid"},
-		{"OPENCODE_WARP_STACK", "ipv5"},
+	opts = cfg.OpenCode
+	if cfg.Gemini != nil || opts.BaseURL.String() != "https://inference.example/v1" || opts.AuthKey != "local-key" ||
+		opts.APIKey != "upstream-key" || opts.FreeCompat || opts.AllowImplicitFree || len(opts.Models) != 2 ||
+		opts.Concurrency != 32 || opts.LargeContextBytes != 0 || opts.Retries != 0 || opts.Cooldown != 0 ||
+		opts.StreamIdleTimeout != 15*time.Second || !opts.WARP || opts.WARPPoolSize != 3 || opts.WARPStack != "ipv6" ||
+		len(opts.ProxyURLs) != 2 || opts.ProxyURLs[0].Host != "proxy.example:8080" || opts.ProxyURLs[1].Scheme != "socks5h" ||
+		opts.Workspace != "/workspace/project" || opts.WorkspaceRoot != "/workspace" {
+		t.Fatalf("unexpected OpenCode settings: %+v", opts)
+	}
+}
+
+func TestRejectInvalidOpenCodeSettings(t *testing.T) {
+	for _, test := range []struct{ yaml, field string }{
+		{"base_url: 'http://example.com'", "base_url"},
+		{"base_url: 'https://key@example.com'", "base_url"},
+		{"base_url: 'https://example.com?key=secret'", "base_url"},
+		{"models: []", "models"},
+		{"models: ['']", "models"},
+		{"models: [opencode/big-pickle]", "models"},
+		{"concurrency: 0", "concurrency"},
+		{"large_context_bytes: -1", "large_context_bytes"},
+		{"large_context_concurrency: 0", "large_context_concurrency"},
+		{"retries: -1", "retries"},
+		{"wait_timeout: 0s", "wait_timeout"},
+		{"first_token_timeout: 0s", "first_token_timeout"},
+		{"stream_idle_timeout: -1s", "stream_idle_timeout"},
+		{"cooldown: -1s", "cooldown"},
+		{"max_body_bytes: -1", "max_body_bytes"},
+		{"warp_pool_size: 0", "warp_pool_size"},
+		{"warp_pool_size: 17", "warp_pool_size"},
+		{"warp_stack: ipv5", "warp_stack"},
+		{"proxy_urls: ['ftp://proxy.example']", "proxy_urls"},
+		{"proxy_urls: ['http://proxy.example/path']", "proxy_urls"},
+		{"proxy_urls: ['http://proxy.example?']", "proxy_urls"},
 	} {
-		t.Run(setting.key+setting.value, func(t *testing.T) {
-			t.Setenv(setting.key, setting.value)
-			if _, err := loadOpenCode(); err == nil {
-				t.Fatal("invalid setting accepted")
-			}
-		})
-	}
-	t.Setenv("OPENCODE_STREAM_IDLE_TIMEOUT", "15s")
-	if cfg, err := loadOpenCode(); err != nil || cfg.StreamIdleTimeout != 15*time.Second {
-		t.Fatalf("cannot configure stream idle timeout: %+v %v", cfg, err)
-	}
-	t.Setenv("OPENCODE_FREE_COMPAT", "false")
-	if cfg, err := loadOpenCode(); err != nil || cfg.FreeCompat {
-		t.Fatalf("cannot disable compatibility: %+v %v", cfg, err)
-	}
-}
-
-func TestOpenCodeWARP(t *testing.T) {
-	t.Setenv("OPENCODE_WARP", " true ")
-	t.Setenv("OPENCODE_WARP_POOL_SIZE", "3")
-	t.Setenv("OPENCODE_WARP_STACK", " v4 ")
-	cfg, err := loadOpenCode()
-	if err != nil || !cfg.WARP || cfg.WARPPoolSize != 3 || cfg.WARPStack != "ipv4" {
-		t.Fatalf("WARP config was not loaded: %+v %v", cfg, err)
-	}
-	for input, want := range map[string]string{"ipv6": "ipv6", "v6": "ipv6", "ipv4": "ipv4", "v4": "ipv4", "dual": "dual", "both": "dual"} {
-		t.Setenv("OPENCODE_WARP_STACK", input)
-		cfg, err := loadOpenCode()
-		if err != nil || cfg.WARPStack != want {
-			t.Fatalf("WARP stack %q = %q, %v; want %q", input, cfg.WARPStack, err, want)
-		}
-	}
-}
-
-func TestOpenCodeProxyURLs(t *testing.T) {
-	t.Setenv("OPENCODE_PROXY_URLS", "http://user:pass@proxy.example:8080, socks5h://127.0.0.1:1080")
-	cfg, err := loadOpenCode()
-	if err != nil || len(cfg.ProxyURLs) != 2 || cfg.ProxyURLs[0].Host != "proxy.example:8080" || cfg.ProxyURLs[1].Scheme != "socks5h" {
-		t.Fatalf("proxy URLs were not parsed: %+v %v", cfg.ProxyURLs, err)
-	}
-}
-
-func TestOpenCodeAuthKey(t *testing.T) {
-	t.Setenv("OPENCODE_AUTH_KEY", "")
-	t.Setenv("opencode_auth_key", "")
-	cfg, err := loadOpenCode()
-	if err != nil || cfg.AuthKey != "" {
-		t.Fatalf("unexpected empty auth key: %+v %v", cfg, err)
-	}
-	t.Setenv("opencode_auth_key", " lower-case ")
-	cfg, err = loadOpenCode()
-	if err != nil || cfg.AuthKey != "lower-case" {
-		t.Fatalf("lower-case auth key was not loaded: %+v %v", cfg, err)
-	}
-	t.Setenv("OPENCODE_AUTH_KEY", " upper-case ")
-	cfg, err = loadOpenCode()
-	if err != nil || cfg.AuthKey != "upper-case" {
-		t.Fatalf("upper-case auth key did not win: %+v %v", cfg, err)
-	}
-}
-
-func TestOpenCodeConcurrency(t *testing.T) {
-	for _, item := range []struct {
-		name, upper, lower string
-		want               int
-		invalid            bool
-	}{
-		{name: "default", want: 10},
-		{name: "single", upper: "1", want: 1},
-		{name: "larger", upper: "32", want: 32},
-		{name: "no arbitrary cap", upper: "100000", want: 100000},
-		{name: "lowercase", lower: "7", want: 7},
-		{name: "uppercase wins", upper: "20", lower: "7", want: 20},
-		{name: "whitespace", upper: " 16 ", want: 16},
-		{name: "zero", upper: "0", invalid: true},
-		{name: "negative", lower: "-2", invalid: true},
-		{name: "fraction", upper: "2.5", invalid: true},
-		{name: "text", upper: "auto", invalid: true},
-		{name: "overflow", upper: "9999999999999999999999999", invalid: true},
-		{name: "invalid uppercase does not fall back", upper: "bad", lower: "7", invalid: true},
-	} {
-		t.Run(item.name, func(t *testing.T) {
-			t.Setenv("OPENCODE_CONCURRENCY", "")
-			t.Setenv("opencode_concurrency", item.lower)
-			if item.upper != "" {
-				t.Setenv("OPENCODE_CONCURRENCY", item.upper)
-			}
-			cfg, err := loadOpenCode()
-			if item.invalid {
-				if err == nil {
-					t.Fatal("invalid concurrency accepted")
-				}
-				return
-			}
-			if err != nil || cfg.Concurrency != item.want {
-				t.Fatalf("concurrency=%d, want=%d, error=%v", cfg.Concurrency, item.want, err)
+		t.Run(test.yaml, func(t *testing.T) {
+			_, err := decode(strings.NewReader("opencode:\n  enabled: true\n  " + test.yaml))
+			if err == nil || !strings.Contains(err.Error(), "opencode."+test.field) {
+				t.Fatalf("want error for %s, got %v", test.field, err)
 			}
 		})
 	}

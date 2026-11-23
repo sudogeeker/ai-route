@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"aizasy.pages.dev/ai-route/internal/config"
-	"aizasy.pages.dev/ai-route/internal/gemini"
 	"aizasy.pages.dev/ai-route/internal/ipv6"
 	"aizasy.pages.dev/ai-route/internal/logging"
 	"aizasy.pages.dev/ai-route/internal/opencode"
+	"aizasy.pages.dev/ai-route/internal/relay"
 	"aizasy.pages.dev/ai-route/internal/server"
 	"aizasy.pages.dev/ai-route/internal/warp"
 )
@@ -24,48 +24,44 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	defer logger.Close()
 
-	sources, err := ipv6.NewSourcePool(cfg.ManualCIDRs)
-	if err != nil {
-		if len(cfg.ManualCIDRs) != 0 {
-			return fmt.Errorf("initialize source IPv6 ranges: %w", err)
-		}
-		// OpenCode can use a proxy pool or normal IPv4 connectivity. Gemini
-		// remains IPv6-only and will fail until a usable source is available.
-		logger.Warnf("No local IPv6 source range: %v", err)
-		sources = nil
-	}
-	google := gemini.New(cfg.Gemini, sources, logger)
-	defer google.Close()
-	if err := google.Refresh(ctx); err != nil {
-		logger.Warnf("Initial AAAA resolve failed: %v", err)
-	}
-	updaterCtx, stopUpdater := context.WithCancel(ctx)
-	updaterDone := make(chan struct{})
-	go func() { defer close(updaterDone); google.Run(updaterCtx) }()
-	defer func() { stopUpdater(); <-updaterDone }()
-
-	var warpPool *warp.Pool
-	if cfg.OpenCode.WARP {
-		stack, parseErr := warp.ParseStack(cfg.OpenCode.WARPStack)
-		if parseErr != nil {
-			return fmt.Errorf("parse OpenCode WARP stack: %w", parseErr)
-		}
-		warpPool, err = warp.NewWithStack(ctx, logger, cfg.OpenCode.WARPPoolSize, stack)
+	var sources *ipv6.SourcePool
+	if len(cfg.ManualCIDRs) > 0 || usesIPv6(cfg) {
+		sources, err = ipv6.NewSourcePool(cfg.ManualCIDRs)
 		if err != nil {
-			return fmt.Errorf("initialize OpenCode WARP egress: %w", err)
-		}
-		defer warpPool.Close()
-		if len(cfg.OpenCode.ProxyURLs) != 0 {
-			logger.Warnf("OPENCODE_WARP takes precedence over OPENCODE_PROXY_URLS")
+			if len(cfg.ManualCIDRs) != 0 {
+				return fmt.Errorf("initialize source IPv6 ranges: %w", err)
+			}
+			logger.Warnf("No local IPv6 source range; using system-assigned source addresses: %v", err)
 		}
 	}
-	free := opencode.NewWithWARP(cfg.OpenCode, sources, logger, warpPool)
-	if cfg.OpenCode.AuthKey == "" {
-		logger.Warnf("OPENCODE_AUTH_KEY is not set; OpenCode endpoints are unauthenticated")
+	google, stopGoogle := startRelay(ctx, cfg.Gemini, sources, logger)
+	defer stopGoogle()
+	openai, stopOpenAI := startRelay(ctx, cfg.OpenAI, sources, logger)
+	defer stopOpenAI()
+
+	var free server.ChatProvider
+	var authKey string
+	var maxBodyBytes int64
+	if opts := cfg.OpenCode; opts != nil {
+		var warpPool *warp.Pool
+		if opts.WARP {
+			warpPool, err = warp.NewWithStack(ctx, logger, opts.WARPPoolSize, warp.Stack(opts.WARPStack))
+			if err != nil {
+				return fmt.Errorf("initialize OpenCode WARP egress: %w", err)
+			}
+			defer warpPool.Close()
+			if len(opts.ProxyURLs) != 0 {
+				logger.Warnf("opencode.warp takes precedence over opencode.proxy_urls")
+			}
+		}
+		free = opencode.NewWithWARP(*opts, sources, logger, warpPool)
+		authKey, maxBodyBytes = opts.AuthKey, opts.MaxBodyBytes
+		if authKey == "" {
+			logger.Warnf("opencode.auth_key is not set; OpenCode endpoints are unauthenticated")
+		}
 	}
-	router := server.NewRouter(google.Handler(), free, cfg.OpenCode.AuthKey, cfg.OpenCode.MaxBodyBytes)
-	// Keep the original path allowlist outside logging and both provider handlers.
-	handler := gemini.Allowlist(logger.Middleware(router))
+	router := server.NewRouter(google, openai, free, authKey, maxBodyBytes, cfg.OpenAIHost)
+	handler := server.Allowlist(logger.Middleware(router))
 	httpServer := &http.Server{
 		Addr: cfg.ListenAddr, Handler: handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -88,5 +84,33 @@ func Run(ctx context.Context, cfg config.Config) error {
 			return err
 		}
 		return nil
+	}
+}
+
+func usesIPv6(cfg config.Config) bool {
+	for _, upstream := range []*config.Relay{cfg.Gemini, cfg.OpenAI} {
+		if upstream != nil && upstream.IPFamily != "ipv4" {
+			return true
+		}
+	}
+	opts := cfg.OpenCode
+	return opts != nil && !opts.WARP && len(opts.ProxyURLs) == 0
+}
+
+func startRelay(parent context.Context, cfg *config.Relay, sources *ipv6.SourcePool, logger *logging.Logger) (http.Handler, func()) {
+	if cfg == nil {
+		return nil, func() {}
+	}
+	proxy := relay.New(*cfg, sources, logger)
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proxy.Run(ctx)
+	}()
+	return proxy.Handler(), func() {
+		cancel()
+		<-done
+		proxy.Close()
 	}
 }

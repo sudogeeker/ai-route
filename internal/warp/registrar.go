@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"aizasy.pages.dev/ai-route/internal/httpx"
 )
 
 const (
@@ -34,13 +36,10 @@ var fallbackEndpoints = []string{
 
 type registration struct {
 	ID            string
-	Token         string
 	PrivateKey    string
-	PublicKey     string
 	AddressV4     string
 	AddressV6     string
 	PeerPublicKey string
-	Endpoint      string
 	Endpoints     []string
 }
 
@@ -125,7 +124,7 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 		return registration{}, errors.New("read WARP device: WARP is not enabled")
 	}
 	addresses := current.Result.Config.Interface.Addresses
-	var peerPublicKey, endpoint string
+	var peerPublicKey string
 	var endpoints []string
 	if len(current.Result.Config.Peers) != 0 {
 		peer := current.Result.Config.Peers[0]
@@ -152,21 +151,15 @@ func (r *registrar) register(ctx context.Context) (registration, error) {
 	if peerPublicKey == "" {
 		peerPublicKey = defaultPeer
 	}
-	if len(endpoints) != 0 {
-		endpoint = endpoints[0]
-	}
 	if addresses.V4 == "" && addresses.V6 == "" {
 		return registration{}, errors.New("read WARP device: config omitted both IP addresses")
 	}
 	return registration{
 		ID:            created.Result.ID,
-		Token:         created.Result.Token,
 		PrivateKey:    privateKey,
-		PublicKey:     publicKey,
 		AddressV4:     addresses.V4,
 		AddressV6:     addresses.V6,
 		PeerPublicKey: peerPublicKey,
-		Endpoint:      endpoint,
 		Endpoints:     endpoints,
 	}, nil
 }
@@ -243,7 +236,7 @@ func (r *registrar) doJSON(ctx context.Context, method, path string, body []byte
 			if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
 				return lastErr
 			}
-			if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > 0 {
+			if retryAfter := httpx.RetryAfter(resp.Header.Get("Retry-After"), time.Now()); retryAfter > 0 {
 				timer := time.NewTimer(retryAfter)
 				select {
 				case <-ctx.Done():
@@ -271,20 +264,6 @@ func wireGuardKeypair() (string, string, error) {
 		return "", "", err
 	}
 	return base64.StdEncoding.EncodeToString(privateKey.Bytes()), base64.StdEncoding.EncodeToString(privateKey.PublicKey().Bytes()), nil
-}
-
-func parseRetryAfter(value string) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
-		return time.Duration(seconds) * time.Second
-	}
-	if at, err := http.ParseTime(value); err == nil && at.After(time.Now()) {
-		return time.Until(at)
-	}
-	return 0
 }
 
 type deviceEnvelope struct {

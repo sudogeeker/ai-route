@@ -1,4 +1,4 @@
-package gemini
+package relay
 
 import (
 	"bufio"
@@ -17,21 +17,22 @@ import (
 
 	"aizasy.pages.dev/ai-route/internal/config"
 	"aizasy.pages.dev/ai-route/internal/logging"
+	"aizasy.pages.dev/ai-route/internal/server"
 )
 
 const livePath = "/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 
 func TestGeminiPathAllowlist(t *testing.T) {
-	for _, path := range []string{livePath, strings.Replace(livePath, "v1beta", "v1alpha", 1), "/v1/models", "/v1beta/models/test:generateContent", "/v1alpha/models", "/upload/v1beta/files", "/upload/v1beta/files/session", "/opencode/v1", "/opencode/v1/models", "/opencode/v1/responses"} {
+	for _, path := range []string{livePath, strings.Replace(livePath, "v1beta", "v1alpha", 1), "/v1/models", "/v1beta/models/test:generateContent", "/v1beta/openai/chat/completions", "/v1alpha/models", "/upload/v1beta/files", "/upload/v1beta/files/session", "/opencode/v1", "/opencode/v1/models", "/opencode/v1/responses", "/openai/v1", "/openai/v1/realtime"} {
 		r := httptest.NewRecorder()
-		Allowlist(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(r, httptest.NewRequest("GET", path, nil))
+		server.Allowlist(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) })).ServeHTTP(r, httptest.NewRequest("GET", path, nil))
 		if r.Code != 204 {
 			t.Errorf("allowed path %q returned %d", path, r.Code)
 		}
 	}
-	for _, path := range []string{"/", "/ws/anything", livePath + "/extra", livePath + "Constrained", "/v1beta-other", "/admin", "/upload/v1beta/files-other", "/upload/admin"} {
+	for _, path := range []string{"/", "/ws/anything", livePath + "/extra", livePath + "Constrained", "/v1beta-other", "/admin", "/upload/v1beta/files-other", "/upload/admin", "/openai", "/openai/v1beta", "/openai/v10/models"} {
 		r := httptest.NewRecorder()
-		Allowlist(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("blocked request reached upstream") })).ServeHTTP(r, httptest.NewRequest("GET", path, nil))
+		server.Allowlist(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("blocked request reached upstream") })).ServeHTTP(r, httptest.NewRequest("GET", path, nil))
 		if r.Code != 404 {
 			t.Errorf("blocked path %q returned %d", path, r.Code)
 		}
@@ -41,15 +42,38 @@ func TestGeminiPathAllowlist(t *testing.T) {
 // Exercise real TCP upgrades through the production allowlist, logger and proxy,
 // with a TLS upstream advertising HTTP/2. No Google API key or IPv6 is needed.
 func TestLiveWebSocketProxy(t *testing.T) {
+	for _, endpoint := range []struct {
+		name string
+		host string
+		path string
+	}{
+		{"Gemini", "gapi.example.com", livePath},
+		{"OpenAI Realtime", "openai.gateway.example", "/v1/realtime"},
+	} {
+		t.Run(endpoint.name, func(t *testing.T) {
+			testLiveWebSocketProxy(t, endpoint.host, endpoint.path)
+		})
+	}
+}
+
+func testLiveWebSocketProxy(t *testing.T, host, path string) {
+	const query = "key=synthetic%2Fkey%2Bvalue&model=realtime-model"
+	const protocol = "realtime"
+	isOpenAI := path == "/v1/realtime"
 	for _, level := range []int{logging.LevelDebug, logging.LevelInfo, logging.LevelWarn, logging.LevelError} {
 		t.Run(fmt.Sprint(level), func(t *testing.T) {
 			var logs bytes.Buffer
 			logger := logging.New(level, &logs)
 			defer logger.Close()
 			upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != livePath || r.URL.RawQuery != "key=synthetic%2Fkey%2Bvalue" || r.Header.Get("Upgrade") != "websocket" || r.ProtoMajor != 1 || r.Host == "gapi.example.com" {
+				if r.URL.Path != path || r.URL.RawQuery != query || r.Header.Get("Upgrade") != "websocket" || r.ProtoMajor != 1 || r.Host == host {
 					t.Errorf("unexpected upstream request: %s %s host=%s", r.Proto, r.URL, r.Host)
 					w.WriteHeader(400)
+					return
+				}
+				if isOpenAI && (r.Header.Get("Authorization") != "Bearer synthetic" || r.Header.Get("Sec-WebSocket-Protocol") != protocol) {
+					t.Error("OpenAI Realtime credentials or subprotocol were not forwarded")
+					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
 				conn, rw, err := http.NewResponseController(w).Hijack()
@@ -60,7 +84,11 @@ func TestLiveWebSocketProxy(t *testing.T) {
 				defer conn.Close()
 				conn.SetDeadline(time.Now().Add(5 * time.Second))
 				hash := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-				fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(hash[:]))
+				fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: %s\r\n", base64.StdEncoding.EncodeToString(hash[:]))
+				if isOpenAI {
+					fmt.Fprintf(rw, "Sec-WebSocket-Protocol: %s\r\n", protocol)
+				}
+				fmt.Fprint(rw, "\r\n")
 				if err := rw.Flush(); err != nil {
 					t.Error(err)
 					return
@@ -81,7 +109,7 @@ func TestLiveWebSocketProxy(t *testing.T) {
 			upstream.StartTLS()
 			defer upstream.Close()
 			target, _ := url.Parse(upstream.URL)
-			transport := New(config.Gemini{}, nil, logger).newTransport()
+			transport := New(config.Relay{TargetHost: target.Host, IPFamily: "dual"}, nil, logger).transport
 			// Keep the production HTTP/2 settings; replace only the IPv6 dialer
 			// and trust settings so this test uses the local TLS server.
 			transport.Proxy = nil
@@ -89,7 +117,12 @@ func TestLiveWebSocketProxy(t *testing.T) {
 			transport.TLSClientConfig = upstream.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
 			defer transport.CloseIdleConnections()
 			done := make(chan struct{})
-			handler := Allowlist(logger.Middleware(newReverseProxy(target, transport, logger)))
+			relay := newReverseProxy(target, transport, logger)
+			var route http.Handler = relay
+			if isOpenAI {
+				route = server.NewRouter(nil, relay, nil, "", 0, host)
+			}
+			handler := server.Allowlist(logger.Middleware(route))
 			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handler.ServeHTTP(w, r)
 				close(done)
@@ -102,7 +135,11 @@ func TestLiveWebSocketProxy(t *testing.T) {
 			}
 			defer conn.Close()
 			conn.SetDeadline(time.Now().Add(5 * time.Second))
-			fmt.Fprintf(conn, "GET %s?key=synthetic%%2Fkey%%2Bvalue HTTP/1.1\r\nHost: gapi.example.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", livePath)
+			fmt.Fprintf(conn, "GET %s?%s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n", path, query, host)
+			if isOpenAI {
+				fmt.Fprintf(conn, "Authorization: Bearer synthetic\r\nSec-WebSocket-Protocol: %s\r\n", protocol)
+			}
+			fmt.Fprint(conn, "\r\n")
 			reader := bufio.NewReader(conn)
 			resp, err := http.ReadResponse(reader, &http.Request{Method: "GET"})
 			if err != nil {
@@ -113,6 +150,9 @@ func TestLiveWebSocketProxy(t *testing.T) {
 			}
 			if resp.Header.Get("Sec-WebSocket-Accept") != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
 				t.Fatal("handshake accept header lost")
+			}
+			if isOpenAI && resp.Header.Get("Sec-WebSocket-Protocol") != protocol {
+				t.Fatal("Realtime subprotocol lost")
 			}
 			for _, frame := range []struct {
 				opcode  byte

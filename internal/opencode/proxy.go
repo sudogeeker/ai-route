@@ -41,10 +41,6 @@ type Proxy struct {
 }
 
 func New(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
-	return newProxy(cfg, sources, logger)
-}
-
-func newProxy(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger) *Proxy {
 	p := &Proxy{
 		cfg:    cfg,
 		logger: logger,
@@ -148,9 +144,13 @@ func (p *Proxy) canRotate() bool {
 	return len(p.cfg.ProxyURLs) > 1
 }
 
+func (p *Proxy) promptWorkspace() promptWorkspace {
+	return promptWorkspace{directory: p.cfg.Workspace, root: p.cfg.WorkspaceRoot}
+}
+
 func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, streaming bool) {
 	w = httpx.DeadlineWriter{ResponseWriter: w, Timeout: p.streamIdleTimeout()}
-	request, err := prepareChat(body, streaming, p.cfg.FreeCompat)
+	request, err := p.promptWorkspace().prepareChat(body, streaming, p.cfg.FreeCompat)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -194,12 +194,13 @@ func (p *Proxy) ServeChat(w http.ResponseWriter, r *http.Request, body []byte, s
 // Completions races used by the direct chat endpoint.
 func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request, body []byte) {
 	w = httpx.DeadlineWriter{ResponseWriter: w, Timeout: p.streamIdleTimeout()}
-	padding := chatTools
-	if requestHasTools(body) {
-		padding = chatCoreTools
-	}
-	if !p.cfg.FreeCompat {
-		padding = nil
+	var padding []byte
+	if p.cfg.FreeCompat {
+		if requestHasTools(body) {
+			padding = chatCoreTools()
+		} else {
+			padding = toolsJSON
+		}
 	}
 	plan, err := responses.Prepare(body, padding)
 	if err != nil {
@@ -208,7 +209,7 @@ func (p *Proxy) ServeResponses(w http.ResponseWriter, r *http.Request, body []by
 	}
 	chatBody := plan.ChatBody
 	if p.cfg.FreeCompat {
-		chatBody, err = injectAgentPrompt(chatBody)
+		chatBody, err = p.promptWorkspace().injectAgentPrompt(chatBody)
 		if err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, "invalid_request_error", "Responses messages must be an array")
 			return

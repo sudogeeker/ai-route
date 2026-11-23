@@ -10,12 +10,12 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"aizasy.pages.dev/ai-route/internal/config"
+	"aizasy.pages.dev/ai-route/internal/httpx"
 )
 
 type attemptResult struct {
@@ -114,7 +114,7 @@ func (p *Proxy) attempt(ctx context.Context, source net.IP, request chatRequest,
 	result.cleanup = func() { cancel(); resp.Body.Close(); transport.CloseIdleConnections(); release() }
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.body, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
-		result.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		result.retryAfter = httpx.RetryAfter(resp.Header.Get("Retry-After"), time.Now())
 		result.terminal = terminalLimit(resp.StatusCode, result.body)
 		if p.warpPool != nil && lease != nil && !result.terminal {
 			p.warpPool.Report(lease, resp.StatusCode, result.body)
@@ -194,23 +194,6 @@ func (b *uploadTrackingBody) Read(p []byte) (int, error) {
 }
 
 func (b *uploadTrackingBody) Close() error { return nil }
-
-func parseRetryAfter(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0
-	}
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds > 0 {
-			return time.Duration(seconds) * time.Second
-		}
-		return 0
-	}
-	if at, err := http.ParseTime(value); err == nil && at.After(now) {
-		return at.Sub(now)
-	}
-	return 0
-}
 
 // A 200 containing an error, truncated JSON, or an empty choices list is not a winner.
 func validChat(data []byte, streaming bool) (bool, error) {

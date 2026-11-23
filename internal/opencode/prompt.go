@@ -22,13 +22,18 @@ Use the skill tool to load a skill when a task matches its description.
   </skill>
 </available_skills>`
 
-func agentEnvironment(model string) string {
-	workingDirectory := strings.TrimSpace(os.Getenv("OPENCODE_WORKSPACE"))
+type promptWorkspace struct {
+	directory string
+	root      string
+}
+
+func (workspace promptWorkspace) agentEnvironment(model string) string {
+	workingDirectory := strings.TrimSpace(workspace.directory)
 	if workingDirectory == "" {
 		workingDirectory, _ = os.Getwd()
 	}
 	workingDirectory = filepath.Clean(workingDirectory)
-	workspaceRoot := strings.TrimSpace(os.Getenv("OPENCODE_WORKSPACE_ROOT"))
+	workspaceRoot := strings.TrimSpace(workspace.root)
 	if workspaceRoot == "" {
 		workspaceRoot = workingDirectory
 	}
@@ -58,23 +63,23 @@ func agentEnvironment(model string) string {
 	}, "\n")
 }
 
-func agentSystemContent(model, instructions string) string {
-	parts := []string{agentEnvironment(model), agentSkills}
+func (workspace promptWorkspace) agentSystemContent(model, instructions string) string {
+	parts := []string{workspace.agentEnvironment(model), agentSkills}
 	if instructions = strings.TrimSpace(instructions); instructions != "" {
 		parts = append(parts, instructions)
 	}
 	return strings.Join(parts, "\n")
 }
 
-func agentPromptMessage(model, instructions string) json.RawMessage {
-	content, _ := json.Marshal(agentSystemContent(model, instructions))
+func (workspace promptWorkspace) agentPromptMessage(model, instructions string) json.RawMessage {
+	content, _ := json.Marshal(workspace.agentSystemContent(model, instructions))
 	return json.RawMessage(`{"role":"system","content":` + string(content) + `}`)
 }
 
 // injectAgentPrompt builds the single system message used by the 1.19.4 CLI.
 // Caller system and developer content are kept in order after the skills block,
 // matching the CLI's final user.system assembly.
-func injectAgentPrompt(body []byte) ([]byte, error) {
+func (workspace promptWorkspace) injectAgentPrompt(body []byte) ([]byte, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
 		return body, nil
@@ -104,7 +109,7 @@ func injectAgentPrompt(body []byte) ([]byte, error) {
 		}
 		kept = append(kept, raw)
 	}
-	messages = append([]json.RawMessage{agentPromptMessage(model, strings.Join(instructions, "\n"))}, kept...)
+	messages = append([]json.RawMessage{workspace.agentPromptMessage(model, strings.Join(instructions, "\n"))}, kept...)
 	encoded, err := json.Marshal(messages)
 	if err != nil {
 		return nil, err

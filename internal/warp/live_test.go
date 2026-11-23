@@ -21,7 +21,7 @@ func TestWARPLiveRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	egress, err := newExitWithStack(ctx, reg, stack)
+	egress, err := newExit(ctx, reg, stack)
 	if err != nil {
 		t.Fatal(err)
 	}

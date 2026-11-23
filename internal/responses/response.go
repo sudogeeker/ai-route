@@ -1,21 +1,14 @@
 package responses
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
-)
-
-const (
-	maxSSELine        = 8 << 20
-	maxResponseStream = 64 << 20
 )
 
 // WriteStream converts a Chat Completions SSE stream into Responses API SSE
@@ -61,7 +54,6 @@ type streamState struct {
 	message    *messageState
 	reasoning  *reasoningState
 	calls      map[int]*callState
-	callOrder  []int
 	usage      json.RawMessage
 	finishKind string
 	status     string
@@ -91,23 +83,8 @@ func (s *streamState) text(delta string) error {
 		s.summary.WriteString(delta)
 		return nil
 	}
-	if s.message != nil && s.message.closed {
-		s.message = nil
-	}
 	if s.message == nil {
-		if s.reasoning != nil && !s.reasoning.closed {
-			s.closeReasoning()
-		}
-		s.message = &messageState{id: randomID("msg")}
-		s.message.index = len(s.output)
-		s.output = append(s.output, s.message.item(false))
-		if err := s.emit("response.output_item.added", object{"output_index": s.message.index, "item": s.message.item(false)}); err != nil {
-			return err
-		}
-		if err := s.emit("response.content_part.added", object{
-			"item_id": s.message.id, "output_index": s.message.index, "content_index": 0,
-			"part": object{"type": "output_text", "text": "", "annotations": []any{}},
-		}); err != nil {
+		if err := s.startMessage(); err != nil {
 			return err
 		}
 	}
@@ -118,21 +95,31 @@ func (s *streamState) text(delta string) error {
 	})
 }
 
+func (s *streamState) startMessage() error {
+	if s.reasoning != nil {
+		s.closeReasoning()
+	}
+	s.message = &messageState{id: randomID("msg"), index: len(s.output)}
+	item := s.message.item(false)
+	s.output = append(s.output, item)
+	if err := s.emit("response.output_item.added", object{"output_index": s.message.index, "item": item}); err != nil {
+		return err
+	}
+	return s.emit("response.content_part.added", object{
+		"item_id": s.message.id, "output_index": s.message.index, "content_index": 0,
+		"part": object{"type": "output_text", "text": "", "annotations": []any{}},
+	})
+}
+
 func (s *streamState) think(delta string) error {
-	if delta == "" {
+	if s.plan.compact || delta == "" {
 		return nil
-	}
-	if s.plan.compact {
-		return nil
-	}
-	if s.reasoning != nil && s.reasoning.closed {
-		s.reasoning = nil
 	}
 	if s.reasoning == nil {
-		s.reasoning = &reasoningState{id: randomID("rs")}
-		s.reasoning.index = len(s.output)
-		s.output = append(s.output, s.reasoning.item(false))
-		if err := s.emit("response.output_item.added", object{"output_index": s.reasoning.index, "item": s.reasoning.item(false)}); err != nil {
+		s.reasoning = &reasoningState{id: randomID("rs"), index: len(s.output)}
+		item := s.reasoning.item(false)
+		s.output = append(s.output, item)
+		if err := s.emit("response.output_item.added", object{"output_index": s.reasoning.index, "item": item}); err != nil {
 			return err
 		}
 		if err := s.emit("response.content_part.added", object{
@@ -161,15 +148,9 @@ func (s *streamState) call(index int, id, wire, arguments string, kind string) e
 	}
 	call := s.calls[index]
 	if call == nil {
-		call = &callState{index: index, outputIndex: len(s.output), callID: id}
-		if kind == "custom" {
-			call.custom = true
-		}
+		call = &callState{outputIndex: len(s.output), callID: id, custom: kind == "custom"}
 		if wire != "" {
 			call.name, call.namespace, call.custom = s.plan.toolInfo(wire)
-			if call.name == "" {
-				call.name = wire
-			}
 		}
 		if call.custom {
 			call.itemID = randomID("ctc")
@@ -177,9 +158,9 @@ func (s *streamState) call(index int, id, wire, arguments string, kind string) e
 			call.itemID = randomID("fc")
 		}
 		s.calls[index] = call
-		s.callOrder = append(s.callOrder, index)
-		s.output = append(s.output, call.item(false))
-		if err := s.emit("response.output_item.added", object{"output_index": call.outputIndex, "item": call.item(false)}); err != nil {
+		item := call.item(false)
+		s.output = append(s.output, item)
+		if err := s.emit("response.output_item.added", object{"output_index": call.outputIndex, "item": item}); err != nil {
 			return err
 		}
 	} else {
@@ -188,22 +169,22 @@ func (s *streamState) call(index int, id, wire, arguments string, kind string) e
 		}
 		if wire != "" && call.name == "" {
 			call.name, call.namespace, call.custom = s.plan.toolInfo(wire)
-			if call.name == "" {
-				call.name = wire
-			}
 		}
 	}
+	call.arguments.WriteString(arguments)
 	if arguments == "" || call.custom {
-		call.arguments.WriteString(arguments)
 		return nil
 	}
-	call.arguments.WriteString(arguments)
 	return s.emit("response.function_call_arguments.delta", object{
 		"item_id": call.itemID, "output_index": call.outputIndex, "delta": arguments,
 	})
 }
 
 func (s *streamState) finish() {
+	s.status = "completed"
+	if s.finishKind == "length" || s.finishKind == "content_filter" {
+		s.status = "incomplete"
+	}
 	if s.plan.compact {
 		text := strings.TrimSpace(s.summary.String())
 		if text == "" {
@@ -218,19 +199,14 @@ func (s *streamState) finish() {
 		s.output = append(s.output, item)
 		_ = s.emit("response.output_item.added", object{"output_index": index, "item": item})
 		_ = s.emit("response.output_item.done", object{"output_index": index, "item": item})
-		s.status = "completed"
-		if s.finishKind == "length" || s.finishKind == "content_filter" {
-			s.status = "incomplete"
-		}
 		return
 	}
 	type closing struct {
 		index int
 		close func()
 	}
-	items := make([]closing, 0, len(s.callOrder)+2)
-	for _, index := range s.callOrder {
-		call := s.calls[index]
+	items := make([]closing, 0, len(s.calls)+2)
+	for _, call := range s.calls {
 		items = append(items, closing{call.outputIndex, func() { s.closeCall(call) }})
 	}
 	if s.reasoning != nil {
@@ -244,27 +220,12 @@ func (s *streamState) finish() {
 		item.close()
 	}
 	if len(s.output) == 0 {
-		s.message = &messageState{id: randomID("msg")}
-		s.message.index = len(s.output)
-		s.output = append(s.output, s.message.item(false))
-		_ = s.emit("response.output_item.added", object{"output_index": s.message.index, "item": s.message.item(false)})
-		_ = s.emit("response.content_part.added", object{
-			"item_id": s.message.id, "output_index": s.message.index, "content_index": 0,
-			"part": object{"type": "output_text", "text": "", "annotations": []any{}},
-		})
+		_ = s.startMessage()
 		s.closeMessage()
-	}
-	s.status = "completed"
-	if s.finishKind == "length" || s.finishKind == "content_filter" {
-		s.status = "incomplete"
 	}
 }
 
 func (s *streamState) closeMessage() {
-	if s.message == nil || s.message.closed {
-		return
-	}
-	s.message.closed = true
 	text := s.message.text.String()
 	_ = s.emit("response.output_text.done", object{
 		"item_id": s.message.id, "output_index": s.message.index, "content_index": 0,
@@ -275,14 +236,10 @@ func (s *streamState) closeMessage() {
 		"part": object{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}},
 	})
 	s.output[s.message.index] = s.message.item(true)
-	_ = s.emit("response.output_item.done", object{"output_index": s.message.index, "item": s.message.item(true)})
+	_ = s.emit("response.output_item.done", object{"output_index": s.message.index, "item": s.output[s.message.index]})
 }
 
 func (s *streamState) closeReasoning() {
-	if s.reasoning == nil || s.reasoning.closed {
-		return
-	}
-	s.reasoning.closed = true
 	text := s.reasoning.text.String()
 	_ = s.emit("response.reasoning_text.done", object{
 		"item_id": s.reasoning.id, "output_index": s.reasoning.index, "content_index": 0, "text": text,
@@ -292,14 +249,11 @@ func (s *streamState) closeReasoning() {
 		"part": object{"type": "reasoning_text", "text": text},
 	})
 	s.output[s.reasoning.index] = s.reasoning.item(true)
-	_ = s.emit("response.output_item.done", object{"output_index": s.reasoning.index, "item": s.reasoning.item(true)})
+	_ = s.emit("response.output_item.done", object{"output_index": s.reasoning.index, "item": s.output[s.reasoning.index]})
+	s.reasoning = nil
 }
 
 func (s *streamState) closeCall(call *callState) {
-	if call == nil || call.closed {
-		return
-	}
-	call.closed = true
 	if call.callID == "" {
 		call.callID = randomID("call")
 	}
@@ -319,7 +273,7 @@ func (s *streamState) closeCall(call *callState) {
 		})
 	}
 	s.output[call.outputIndex] = call.item(true)
-	_ = s.emit("response.output_item.done", object{"output_index": call.outputIndex, "item": call.item(true)})
+	_ = s.emit("response.output_item.done", object{"output_index": call.outputIndex, "item": s.output[call.outputIndex]})
 }
 
 func (s *streamState) incompleteDetails() object {
@@ -373,10 +327,9 @@ func (s *streamState) usageObject() object {
 }
 
 type messageState struct {
-	id     string
-	index  int
-	closed bool
-	text   strings.Builder
+	id    string
+	index int
+	text  strings.Builder
 }
 
 func (m *messageState) item(done bool) object {
@@ -389,10 +342,9 @@ func (m *messageState) item(done bool) object {
 }
 
 type reasoningState struct {
-	id     string
-	index  int
-	closed bool
-	text   strings.Builder
+	id    string
+	index int
+	text  strings.Builder
 }
 
 func (r *reasoningState) item(done bool) object {
@@ -405,14 +357,12 @@ func (r *reasoningState) item(done bool) object {
 }
 
 type callState struct {
-	index       int
 	outputIndex int
 	itemID      string
 	callID      string
 	name        string
 	namespace   string
 	custom      bool
-	closed      bool
 	arguments   strings.Builder
 }
 
@@ -513,96 +463,28 @@ func defaultRaw(raw json.RawMessage, fallback any) any {
 // consumeChat accepts the same SSE shape as Chat Completions, including tool
 // call deltas, reasoning content and an optional final usage-only chunk.
 func consumeChat(r io.Reader, state *streamState, allowMissingDone bool) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4096), maxSSELine)
-	var data []string
-	event, eventBytes, totalBytes := "", 0, 0
-	for scanner.Scan() {
-		line := scanner.Text()
-		eventBytes += len(line) + 1
-		totalBytes += len(line) + 1
-		if eventBytes > maxSSELine {
-			return errors.New("Chat stream event exceeds buffer limit")
-		}
-		if totalBytes > maxResponseStream {
-			return errors.New("Chat stream response exceeds buffer limit")
-		}
-		if line != "" {
-			field, value, _ := strings.Cut(line, ":")
-			value = strings.TrimPrefix(value, " ")
-			switch field {
-			case "data":
-				data = append(data, value)
-			case "event":
-				event = value
-			}
-			continue
-		}
-		if event == "error" {
-			return errors.New("Chat stream returned an error event")
-		}
-		payload := strings.Join(data, "\n")
-		data, event, eventBytes = nil, "", 0
-		if payload == "" {
-			continue
-		}
-		if payload == "[DONE]" {
+	stream := newChatStream(r)
+	for {
+		chunk, err := stream.next()
+		// Some Chat-compatible upstreams close the stream after the final
+		// finish_reason without sending the optional [DONE] sentinel. Streaming
+		// callers can safely treat that as a completed response; non-streaming
+		// callers keep requiring [DONE] because they cannot expose partial output.
+		if err == errMissingDone && allowMissingDone && state.finishKind != "" {
 			return nil
 		}
-		if err := state.chunk([]byte(payload)); err != nil {
+		if err != nil || chunk == nil {
+			return err
+		}
+		if err := state.chunk(chunk); err != nil {
 			return err
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	// Some Chat-compatible upstreams close the stream after the final
-	// finish_reason without sending the optional [DONE] sentinel. Streaming
-	// callers can safely treat that as a completed response; non-streaming
-	// callers keep requiring [DONE] because they cannot expose partial output.
-	if allowMissingDone && state.finishKind != "" {
-		return nil
-	}
-	return errors.New("Chat stream ended before [DONE]")
 }
 
-func (s *streamState) chunk(data []byte) error {
-	var chunk struct {
-		Type    json.RawMessage `json:"type"`
-		Error   json.RawMessage `json:"error"`
-		Choices []struct {
-			Index        *int            `json:"index"`
-			FinishReason json.RawMessage `json:"finish_reason"`
-			Delta        struct {
-				Content          json.RawMessage `json:"content"`
-				ReasoningContent json.RawMessage `json:"reasoning_content"`
-				Reasoning        json.RawMessage `json:"reasoning"`
-				ReasoningText    json.RawMessage `json:"reasoning_text"`
-				ToolCalls        []struct {
-					Index    *int   `json:"index"`
-					ID       string `json:"id"`
-					Type     string `json:"type"`
-					Function struct {
-						Name      string          `json:"name"`
-						Arguments json.RawMessage `json:"arguments"`
-					} `json:"function"`
-					Custom struct {
-						Name  string          `json:"name"`
-						Input json.RawMessage `json:"input"`
-					} `json:"custom"`
-				} `json:"tool_calls"`
-			} `json:"delta"`
-		} `json:"choices"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	if err := json.Unmarshal(data, &chunk); err != nil {
-		return fmt.Errorf("invalid Chat stream JSON: %w", err)
-	}
-	if present(chunk.Error) || stringField(chunk.Type) == "error" {
-		return errors.New("Chat stream returned an error payload")
-	}
+func (s *streamState) chunk(chunk *chatChunk) error {
 	if present(chunk.Usage) {
-		s.usage = append(json.RawMessage(nil), chunk.Usage...)
+		s.usage = chunk.Usage
 	}
 	for _, choice := range chunk.Choices {
 		if choice.Index != nil && *choice.Index != 0 {
@@ -626,17 +508,7 @@ func (s *streamState) chunk(data []byte) error {
 			}
 		}
 		for position, call := range choice.Delta.ToolCalls {
-			index := position
-			if call.Index != nil {
-				index = *call.Index
-			}
-			kind := call.Type
-			wire := call.Function.Name
-			arguments := rawText(call.Function.Arguments)
-			if call.Custom.Name != "" {
-				kind, wire = "custom", call.Custom.Name
-				arguments = rawText(call.Custom.Input)
-			}
+			index, wire, arguments, kind := call.fields(position)
 			if err := s.call(index, call.ID, wire, arguments, kind); err != nil {
 				return err
 			}

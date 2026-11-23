@@ -12,12 +12,10 @@ var keyRegex = regexp.MustCompile(`(?i)(key|api_key)=([^&]+)`)
 
 // Middleware logs requests and redacts sensitive keys.
 func (logger *Logger) Middleware(next http.Handler) http.Handler {
+	if logger.level > LevelInfo {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if logger.level > LevelInfo {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		start := time.Now()
 		ww := &responseWrapper{ResponseWriter: w, statusCode: 200}
 		next.ServeHTTP(ww, r)

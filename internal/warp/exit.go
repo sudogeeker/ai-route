@@ -71,16 +71,7 @@ type exit struct {
 	closeOnce sync.Once
 }
 
-func newExit(ctx context.Context, reg registration) (*exit, error) {
-	return newExitWithStack(ctx, reg, DefaultStack)
-}
-
-func newExitWithStack(ctx context.Context, reg registration, stack Stack) (*exit, error) {
-	normalized, err := ParseStack(string(stack))
-	if err != nil {
-		return nil, err
-	}
-	stack = normalized
+func newExit(ctx context.Context, reg registration, stack Stack) (*exit, error) {
 	localV6, v6Err := parseAddress(reg.AddressV6)
 	localV4, v4Err := parseAddress(reg.AddressV4)
 	var localAddresses []netip.Addr
@@ -124,7 +115,7 @@ func newExitWithStack(ctx context.Context, reg registration, stack Stack) (*exit
 		tunDevice.Close()
 		return nil, fmt.Errorf("decode WARP peer key: %w", err)
 	}
-	endpoints, err := resolveEndpoints(ctx, reg.Endpoints, reg.Endpoint)
+	endpoints, err := resolveEndpoints(ctx, reg.Endpoints)
 	if err != nil {
 		tunDevice.Close()
 		return nil, err
@@ -154,10 +145,7 @@ func newExitWithStack(ctx context.Context, reg registration, stack Stack) (*exit
 	return e, nil
 }
 
-func resolveEndpoints(ctx context.Context, candidates []string, fallback string) ([]string, error) {
-	if len(candidates) == 0 && fallback != "" {
-		candidates = []string{fallback}
-	}
+func resolveEndpoints(ctx context.Context, candidates []string) ([]string, error) {
 	seen := make(map[string]bool)
 	var endpoints []string
 	for _, candidate := range candidates {

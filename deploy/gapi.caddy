@@ -6,3 +6,12 @@ handle @gapi {
         stream_close_delay 5m
     }
 }
+
+# Set openai.inbound_host to this hostname in ai-route.yaml.
+@openai host openai.example.com
+handle @openai {
+    reverse_proxy gapi:9999 {
+        header_up Host {http.request.host}
+        stream_close_delay 5m
+    }
+}

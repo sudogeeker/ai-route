@@ -129,7 +129,7 @@ func TestResolveEndpointsPreservesPriority(t *testing.T) {
 		"162.159.192.4:0",
 		"[2606:4700:d0::a29f:c004]:500",
 		"162.159.192.4:2408",
-	}, "")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

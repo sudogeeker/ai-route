@@ -56,7 +56,7 @@ func (p *sharedWARPPool) Fail(egress warpEgress, reason string) {
 }
 
 func NewWithWARP(cfg config.OpenCode, sources *ipv6.SourcePool, logger *logging.Logger, pool *warp.Pool) *Proxy {
-	p := newProxy(cfg, sources, logger)
+	p := New(cfg, sources, logger)
 	if pool != nil {
 		p.warpPool = &sharedWARPPool{pool: pool}
 	}

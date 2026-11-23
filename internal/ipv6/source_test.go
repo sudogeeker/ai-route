@@ -57,6 +57,7 @@ func TestSourcePoolRaceCapacity(t *testing.T) {
 		{"2001:db8:1234::/64", 1},
 		{"2001:db8:1200::/56", 10},
 		{"2001:db8::/48", 10},
+		{"::/0", 10},
 	} {
 		pool, err := NewSourcePool([]string{test.cidr})
 		if err != nil {
@@ -64,6 +65,24 @@ func TestSourcePoolRaceCapacity(t *testing.T) {
 		}
 		if got := pool.RaceCapacity(10); got != test.want {
 			t.Errorf("RaceCapacity(%s)=%d, want %d", test.cidr, got, test.want)
+		}
+	}
+}
+
+func TestSourcePoolAcrossRanges(t *testing.T) {
+	pool, err := NewSourcePool([]string{"2001:db8:1::1234/64", "2001:db8:2::1234/63"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pool.RaceCapacity(4); got != 3 {
+		t.Fatalf("capacity = %d, want 3 distinct /64s", got)
+	}
+	_, first, _ := net.ParseCIDR("2001:db8:1::/64")
+	_, second, _ := net.ParseCIDR("2001:db8:2::/63")
+	for range 16 {
+		ip := pool.Random()
+		if !first.Contains(ip) && !second.Contains(ip) {
+			t.Fatalf("address outside configured ranges: %s", ip)
 		}
 	}
 }

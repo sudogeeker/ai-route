@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"sync"
 )
 
 // toolsJSON is the exact tool array emitted by the OpenCode 1.19.4 CLI. The
@@ -13,66 +14,38 @@ import (
 //go:embed tools.json
 var toolsJSON []byte
 
-type toolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
-	raw         json.RawMessage
+type toolHeader struct {
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
 }
-
-var toolNames = []string{"bash", "edit", "glob", "grep", "read", "skill", "task", "todowrite", "webfetch", "websearch", "write"}
 
 // coreToolNames are the tools the agent-shaped free-tier gate requires.
 var coreToolNames = []string{"bash", "edit", "glob", "grep", "read"}
 
-var toolDefinitions = func() map[string]toolDefinition {
+var toolDefinitions = sync.OnceValue(func() map[string]json.RawMessage {
 	var entries []json.RawMessage
 	if err := json.Unmarshal(toolsJSON, &entries); err != nil {
 		panic(err)
 	}
-	definitions := make(map[string]toolDefinition, len(entries))
+	definitions := make(map[string]json.RawMessage, len(entries))
 	for _, raw := range entries {
-		var entry struct {
-			Function toolDefinition `json:"function"`
-		}
+		var entry toolHeader
 		if err := json.Unmarshal(raw, &entry); err != nil {
 			panic(err)
 		}
-		entry.Function.raw = raw
-		definitions[entry.Function.Name] = entry.Function
+		definitions[entry.Function.Name] = raw
 	}
 	return definitions
-}()
+})
 
-func chatTool(name string) json.RawMessage {
-	definition, ok := toolDefinitions[name]
-	if !ok {
-		return nil
-	}
-	return definition.raw
-}
-
-var chatTools = func() json.RawMessage {
-	return encodeAgentTools(toolNames)
-}()
-
-var chatCoreTools = func() json.RawMessage {
-	return encodeAgentTools(coreToolNames)
-}()
-
-func encodeAgentTools(names []string) json.RawMessage {
-	tools := make([]json.RawMessage, 0, len(names))
-	for _, name := range names {
-		if tool := chatTool(name); tool != nil {
-			tools = append(tools, tool)
-		}
-	}
-	data, err := json.Marshal(tools)
+var chatCoreTools = sync.OnceValue(func() json.RawMessage {
+	data, err := json.Marshal(ensureAgentTools(nil))
 	if err != nil {
 		panic(err)
 	}
 	return data
-}
+})
 
 func requestHasTools(body []byte) bool {
 	var fields struct {
@@ -87,14 +60,14 @@ type chatRequest struct {
 	collect   bool
 }
 
-func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error) {
+func (workspace promptWorkspace) prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error) {
 	body = stripClientMetadata(body)
 	request := chatRequest{body: body, streaming: streaming}
 	if !compatibility {
 		return request, nil
 	}
 	var err error
-	body, err = injectAgentPrompt(body)
+	body, err = workspace.injectAgentPrompt(body)
 	if err != nil {
 		return request, errors.New("messages must be an array")
 	}
@@ -120,14 +93,13 @@ func prepareChat(body []byte, streaming, compatibility bool) (chatRequest, error
 				return request, errors.New("tool_choice requires caller-supplied tools")
 			}
 		}
-	}
-	tools, err := json.Marshal(ensureAgentTools(callerTools))
-	if err != nil {
-		return request, err
-	}
-	fields["tools"] = tools
-	if len(callerTools) == 0 {
+		fields["tools"] = toolsJSON
 		fields["tool_choice"] = json.RawMessage(`"auto"`)
+	} else {
+		fields["tools"], err = json.Marshal(ensureAgentTools(callerTools))
+		if err != nil {
+			return request, err
+		}
 	}
 	// The free tier only serves agent-shaped streaming requests.
 	fields["stream"] = json.RawMessage(`true`)
@@ -173,32 +145,22 @@ func stripClientMetadata(body []byte) []byte {
 // ensureAgentTools rewrites recognised caller tools to their genuine 1.19.4
 // definitions and appends any missing core tools. Caller tools are preserved.
 func ensureAgentTools(tools []json.RawMessage) []json.RawMessage {
-	if len(tools) == 0 {
-		expanded := make([]json.RawMessage, 0, len(toolNames))
-		for _, name := range toolNames {
-			expanded = append(expanded, chatTool(name))
-		}
-		return expanded
-	}
+	definitions := toolDefinitions()
 	present := make(map[string]bool, len(tools))
 	for index, raw := range tools {
-		var entry struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		}
+		var entry toolHeader
 		if json.Unmarshal(raw, &entry) != nil || entry.Function.Name == "" {
 			continue
 		}
 		name := entry.Function.Name
 		present[name] = true
-		if _, known := toolDefinitions[name]; known {
-			tools[index] = chatTool(name)
+		if definition, known := definitions[name]; known {
+			tools[index] = definition
 		}
 	}
 	for _, name := range coreToolNames {
 		if !present[name] {
-			tools = append(tools, chatTool(name))
+			tools = append(tools, definitions[name])
 		}
 	}
 	return tools

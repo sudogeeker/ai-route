@@ -39,26 +39,21 @@ func Open(level, path string) (*Logger, error) {
 	case "WARN":
 		severity = LevelWarn
 	}
-	var writer io.Writer = os.Stdout
-	var closeOutput func() error
-	if path != "" {
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-			return nil, err
-		}
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return nil, err
-		}
-		writer = io.MultiWriter(os.Stdout, file)
-		closeOutput = file.Close
+	if path == "" {
+		return New(severity, os.Stdout), nil
 	}
-	return newLogger(severity, writer, closeOutput), nil
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return newLogger(severity, io.MultiWriter(os.Stdout, file), file.Close), nil
 }
 func (l *Logger) Close() error {
 	return l.output.Close()
 }
-func (l *Logger) Enabled(level int) bool { return l.level <= level }
-
 func (l *Logger) Debugf(f string, v ...interface{}) {
 	if l.level <= LevelDebug {
 		l.logger.Printf("[DEBG] "+f, v...)

@@ -14,7 +14,6 @@ const DefaultPoolSize = 2
 const egressCooldown = 10 * time.Minute
 
 type logger interface {
-	Debugf(string, ...interface{})
 	Infof(string, ...interface{})
 	Warnf(string, ...interface{})
 	Errorf(string, ...interface{})
@@ -24,7 +23,6 @@ type Pool struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	logger  logger
-	size    int
 	newExit func(context.Context) (*exit, error)
 
 	mu            sync.Mutex
@@ -47,18 +45,11 @@ type Lease struct {
 	once sync.Once
 }
 
-func New(ctx context.Context, log logger, size int) (*Pool, error) {
-	return NewWithStack(ctx, log, size, DefaultStack)
-}
-
 // NewWithStack creates a WARP pool whose exits use the selected IP stack.
 func NewWithStack(ctx context.Context, log logger, size int, stack Stack) (*Pool, error) {
 	normalized, err := ParseStack(string(stack))
 	if err != nil {
 		return nil, err
-	}
-	if size <= 0 {
-		size = DefaultPoolSize
 	}
 	r := newRegistrar()
 	return newPool(ctx, log, size, func(ctx context.Context) (*exit, error) {
@@ -66,7 +57,7 @@ func NewWithStack(ctx context.Context, log logger, size int, stack Stack) (*Pool
 		if err != nil {
 			return nil, err
 		}
-		return newExitWithStack(ctx, reg, normalized)
+		return newExit(ctx, reg, normalized)
 	})
 }
 
@@ -80,7 +71,6 @@ func newPool(ctx context.Context, log logger, size int, create func(context.Cont
 		ctx:           poolCtx,
 		cancel:        cancel,
 		logger:        log,
-		size:          size,
 		activeTarget:  activeTarget,
 		standbyTarget: standbyTarget,
 		newExit:       create,
@@ -149,8 +139,6 @@ func (p *Pool) Fail(lease *Lease, reason string) {
 	}
 	p.penalize(lease.exit, reason)
 }
-
-func (p *Pool) Size() int { return p.size }
 
 func (p *Pool) penalize(bad *exit, reason string) {
 	p.mu.Lock()
