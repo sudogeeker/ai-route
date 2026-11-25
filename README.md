@@ -78,16 +78,15 @@ Gemini 和 OpenAI 可各自指定 DoH 解析器，無需本機 DNS 代理或 sid
 gemini:
   doh:
     url: https://dns.google/dns-query
-    bootstrap_ips: ["8.8.8.8", "8.8.4.4"]
 openai:
   enabled: true
-  inbound_host: openai.example.com
   doh:
     url: https://cloudflare-dns.com/dns-query
-    bootstrap_ips: ["1.1.1.1", "1.0.0.1"]
 ```
 
-DoH 使用 DNS wire format 的 HTTPS POST，按 `ip_family` 查詢 A、AAAA 或兩者。使用網域型的 DoH `url` 時必須提供 `bootstrap_ips`；程式直連這些 IP，仍以 DoH URL 的網域驗證 TLS。也可以使用有相符 TLS 憑證的 IP 型 URL，此時不設 `bootstrap_ips`。DoH 失敗不降級到系統 DNS，已有的上游 IP 快取會保留；省略 `doh.url` 才使用系統 DNS。`destination_ips` 或 IP 型的 `target_host` 則直接連線、跳過 DNS。OpenCode 的解析設定不變。
+只填 `doh.url` 即可。若 URL 是網域，程式會使用系統解析器取得 **DoH 伺服器本身**的位址；Gemini 或 OpenAI 上游網域仍由 DoH 以 HTTPS POST 查詢，按 `ip_family` 選擇 A、AAAA 或兩者。若不希望依賴系統 DNS，可選填 `bootstrap_ips`：程式只嘗試清單中的位址，仍以 URL 的網域驗證 TLS。也可直接使用有相符 TLS 憑證的 IP 型 URL，此時不設 `bootstrap_ips`。
+
+DoH 失敗時不會改用系統 DNS 查詢上游，已有的上游 IP 快取會保留。省略 `doh.url` 才會用系統 DNS 查詢上游。`destination_ips` 或 IP 型的 `target_host` 會跳過 DNS。OpenCode 的解析設定不變。
 
 ## 從舊版遷移
 

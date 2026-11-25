@@ -85,6 +85,24 @@ opencode:
 	}
 }
 
+func TestDoHURLWithoutBootstrap(t *testing.T) {
+	const settings = `
+gemini:
+  doh: {url: https://resolver.example/dns-query}
+openai:
+  enabled: true
+  doh: {url: https://other-resolver.example/dns-query, bootstrap_ips: []}
+`
+	cfg, err := decode(strings.NewReader(settings))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Gemini.DoH.URL != "https://resolver.example/dns-query" || cfg.OpenAI.DoH.URL != "https://other-resolver.example/dns-query" ||
+		len(cfg.Gemini.DoH.BootstrapIPs) != 0 || len(cfg.OpenAI.DoH.BootstrapIPs) != 0 {
+		t.Fatalf("unexpected resolver configuration: Gemini=%+v OpenAI=%+v", cfg.Gemini.DoH, cfg.OpenAI.DoH)
+	}
+}
+
 func TestRejectInvalidYAMLSettings(t *testing.T) {
 	for _, test := range []struct{ yaml, message string }{
 		{"unknown: true", "unknown"},
@@ -107,7 +125,7 @@ func TestRejectInvalidYAMLSettings(t *testing.T) {
 		{"openai: {enabled: true, inbound_host: 'https://gateway.example/v1'}", "openai.inbound_host"},
 		{"openai: {enabled: true, inbound_host: 'gateway.example:8080'}", "openai.inbound_host"},
 		{"gemini: {doh: {url: 'http://1.1.1.1/dns-query'}}", "gemini.doh"},
-		{"gemini: {doh: {url: 'https://resolver.example/dns-query'}}", "bootstrap_ips"},
+		{"gemini: {doh: {url: 'https://-resolver.example/dns-query'}}", "hostname"},
 		{"gemini: {doh: {url: 'https://resolver.example/dns-query', bootstrap_ips: ['0.0.0.0']}}", "bootstrap_ips"},
 		{"gemini: {doh: {url: 'https://1.1.1.1/dns-query', bootstrap_ips: ['1.1.1.1']}}", "bootstrap_ips"},
 		{"gemini: {doh: {bootstrap_ips: ['1.1.1.1']}}", "url is required"},

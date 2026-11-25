@@ -143,6 +143,31 @@ func TestDoHRejectsRedirectAndUnrelatedResponse(t *testing.T) {
 	}
 }
 
+func TestDoHSystemBootstrap(t *testing.T) {
+	target := dnsmessage.MustNewName("upstream.invalid.")
+	answer := netip.MustParseAddr("192.0.2.17")
+	resolver := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readDoHQuery(t, r)
+		if query == nil {
+			return
+		}
+		if question := query.Questions[0]; question.Name != target || question.Type != dnsmessage.TypeA {
+			t.Errorf("unexpected DoH question: %+v", question)
+		}
+		writeDoHAnswer(t, w, query, []dnsmessage.Resource{dnsAnswer(target, dnsmessage.TypeA, &dnsmessage.AResource{A: answer.As4()})})
+	}))
+	defer resolver.Close()
+
+	endpoint := "https://" + net.JoinHostPort("localhost", resolverPort(resolver)) + "/dns-query"
+	client := newDoHResolver(config.DoH{URL: endpoint})
+	defer client.client.CloseIdleConnections()
+	trustDoHCertificate(client, resolver.Certificate())
+	client.client.Transport.(*http.Transport).TLSClientConfig.ServerName = resolver.Certificate().DNSNames[0]
+	if ips, err := client.lookup(t.Context(), "ip4", "upstream.invalid"); err != nil || len(ips) != 1 || ips[0] != answer {
+		t.Fatalf("DoH lookup with hostname-only endpoint: %v, %v", ips, err)
+	}
+}
+
 func resolverPort(server *httptest.Server) string {
 	_, port, _ := net.SplitHostPort(server.Listener.Addr().String())
 	return port

@@ -37,16 +37,13 @@ func newDoHResolver(cfg config.DoH) *dohResolver {
 		TLSHandshakeTimeout: 3 * time.Second,
 		IdleConnTimeout:     30 * time.Second,
 		MaxIdleConnsPerHost: 2,
-		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
+		DialContext:         dialer.DialContext,
+	}
+	if len(cfg.BootstrapIPs) != 0 {
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(address)
 			if err != nil {
 				return nil, err
-			}
-			if len(cfg.BootstrapIPs) == 0 {
-				if _, err := netip.ParseAddr(host); err != nil {
-					return nil, errors.New("DoH requires a bootstrap address")
-				}
-				return dialer.DialContext(ctx, network, address)
 			}
 			for _, ip := range cfg.BootstrapIPs {
 				var conn net.Conn
@@ -59,7 +56,7 @@ func newDoHResolver(cfg config.DoH) *dohResolver {
 				}
 			}
 			return nil, fmt.Errorf("dial DoH bootstrap addresses: %w", err)
-		},
+		}
 	}
 	return &dohResolver{
 		endpoint: cfg.URL,

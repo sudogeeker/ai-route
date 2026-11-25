@@ -218,8 +218,8 @@ func (settings DoH) validate() error {
 		if ip.Is6() != strings.HasPrefix(endpoint.Host, "[") {
 			return errors.New("url must bracket IPv6 literals only")
 		}
-	} else if strings.HasPrefix(endpoint.Host, "[") || !validHostname(strings.TrimSuffix(endpoint.Hostname(), ".")) || len(settings.BootstrapIPs) == 0 {
-		return errors.New("a hostname URL requires bootstrap_ips so DoH does not depend on system DNS")
+	} else if strings.HasPrefix(endpoint.Host, "[") || !validHostname(strings.TrimSuffix(endpoint.Hostname(), ".")) {
+		return errors.New("url must contain a valid hostname or IP address")
 	}
 	if port := endpoint.Port(); port != "" {
 		if value, err := strconv.ParseUint(port, 10, 16); err != nil || value == 0 {
